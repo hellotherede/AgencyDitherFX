@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Generated builds
+dist/
+dist-demo/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Logs and reports
+*.log
+coverage/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local agent metadata
+.agents/

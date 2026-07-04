@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="AgencyDitherFX creative coding playground.">
+    <title>AgencyDitherFX / Field Lab</title>
+  </head>
+  <body>
+    <header class="masthead">
+      <a href="/" class="mark">Agency<br>Dither FX</a>
+      <p>Canvas systems for image, type and motion.</p>
+      <div class="masthead__actions">
+        <button type="button" data-copy-config>Copy config</button>
+        <button type="button" data-export-html>Export HTML</button>
+        <button type="button" data-export-png>PNG</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="preview-shell">
+        <div class="preview" data-preview aria-label="Dither effect preview"></div>
+        <div class="hud">
+          <span data-status>Initializing</span>
+          <span data-metrics>0 FPS / 0 cells</span>
+        </div>
+      </section>
+
+      <aside class="controls">
+        <section>
+          <p class="section-label">01 / Source + system</p>
+          <label class="drop">
+            <span>Image / video / SVG</span>
+            <strong>Choose media</strong>
+            <input type="file" data-upload accept="image/*,video/*,.svg,image/svg+xml">
+          </label>
+          <label class="drop drop--small">
+            <span>Optional transition source B</span>
+            <strong>Choose source B</strong>
+            <input type="file" data-upload-secondary accept="image/*,video/*,.svg,image/svg+xml">
+          </label>
+          <label><span>Source blend</span><output></output><input data-control="sourceMix" type="range" min="0" max="1" step="0.01"></label>
+          <label class="drop drop--small">
+            <span>Optional luminance mask</span>
+            <strong>Choose mask</strong>
+            <input type="file" data-upload-mask accept="image/*,video/*,.svg,image/svg+xml">
+          </label>
+          <label><span>Mask threshold</span><output></output><input data-control="maskThreshold" type="range" min="0" max="1" step="0.01"></label>
+          <label><span>Mask feather</span><output></output><input data-control="maskFeather" type="range" min="0.01" max="1" step="0.01"></label>
+          <label><span>Mask fit</span>
+            <select data-control="maskFit">
+              <option value="contain">Contain</option>
+              <option value="cover">Cover</option>
+              <option value="fill">Fill</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+          <label><span>Mask position X</span><output></output><input data-control="maskPositionX" type="range" min="0" max="1" step="0.01"></label>
+          <label><span>Mask position Y</span><output></output><input data-control="maskPositionY" type="range" min="0" max="1" step="0.01"></label>
+          <label><span>Mask scale</span><output></output><input data-control="maskScale" type="range" min="0.1" max="3" step="0.01"></label>
+          <label class="toggle"><span>Invert mask</span><input data-control="maskInvert" type="checkbox"></label>
+          <label>
+            <span>Preset</span>
+            <select data-control="preset"></select>
+          </label>
+          <label>
+            <span>Mode</span>
+            <select data-control="mode">
+              <option value="dots">Dots</option>
+              <option value="blocks">Blocks</option>
+              <option value="halftone">Halftone</option>
+              <option value="ascii">ASCII</option>
+              <option value="symbols">SVG symbols</option>
+              <option value="hybrid">Hybrid</option>
+              <option value="raw-dither">Raw dither</option>
+            </select>
+          </label>
+          <label>
+            <span>Source fit</span>
+            <select data-control="fit">
+              <option value="cover">Cover</option>
+              <option value="contain">Contain</option>
+              <option value="fill">Fill</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+          <label>
+            <span>Algorithm</span>
+            <select data-control="algorithm">
+              <optgroup label="Realtime safe">
+                <option value="threshold">Threshold</option>
+                <option value="bayer2">Bayer 2x2</option>
+                <option value="bayer4">Bayer 4x4</option>
+                <option value="bayer8">Bayer 8x8</option>
+                <option value="bayer16">Bayer 16x16</option>
+                <option value="blue-noise">Blue noise</option>
+                <option value="random">Random noise</option>
+                <option value="halftone">Clustered halftone</option>
+              </optgroup>
+              <optgroup label="CPU / throttled">
+                <option value="floyd-steinberg">Floyd-Steinberg</option>
+                <option value="atkinson">Atkinson</option>
+                <option value="stucki">Stucki</option>
+                <option value="jarvis">Jarvis-Judice-Ninke</option>
+              </optgroup>
+            </select>
+          </label>
+          <label>
+            <span>Renderer</span>
+            <select data-control="renderer">
+              <option value="canvas">Canvas 2D</option>
+              <option value="webgl">WebGL (fallback)</option>
+              <option value="svg">SVG (fallback)</option>
+            </select>
+          </label>
+        </section>
+
+        <section>
+          <p class="section-label">02 / Sampling</p>
+          <label class="toggle"><span>Responsive density</span><input data-control="responsive" type="checkbox"></label>
+          <label><span>Cell size</span><output></output><input data-control="cellSize" type="range" min="3" max="32" step="1"></label>
+          <label><span>Responsive minimum</span><output></output><input data-control="responsiveMinCellSize" type="range" min="2" max="20" step="1"></label>
+          <label><span>Responsive maximum</span><output></output><input data-control="responsiveMaxCellSize" type="range" min="6" max="40" step="1"></label>
+          <label><span>Threshold</span><output></output><input data-control="threshold" type="range" min="0" max="1" step="0.01"></label>
+          <label><span>Dither amount</span><output></output><input data-control="ditherAmount" type="range" min="0" max="1" step="0.01"></label>
+          <label><span>Contrast</span><output></output><input data-control="contrast" type="range" min="0.2" max="2.5" step="0.01"></label>
+          <label><span>Brightness</span><output></output><input data-control="brightness" type="range" min="-0.5" max="0.5" step="0.01"></label>
+          <label><span>Gamma</span><output></output><input data-control="gamma" type="range" min="0.2" max="2.5" step="0.01"></label>
+          <label class="toggle"><span>Invert luminance</span><input data-control="invert" type="checkbox"></label>
+        </section>
+
+        <section>
+          <p class="section-label">03 / Primitive</p>
+          <label><span>Dot scale</span><output></output><input data-control="dotScale" type="range" min="0" max="2" step="0.01"></label>
+          <label><span>Symbol scale</span><output></output><input data-control="symbolScale" type="range" min="0" max="2" step="0.01"></label>
+          <label><span>Rotation</span><output></output><input data-control="rotation" type="range" min="0" max="180" step="1"></label>
+          <label><span>Glyph ramp</span><input data-control="glyphRamp" type="text"></label>
+          <label><span>Color mapping</span>
+            <select data-control="colorMode">
+              <option value="monochrome">Monochrome</option>
+              <option value="source">Source color</option>
+              <option value="brightness">Brightness map</option>
+              <option value="palette">Nearest palette color</option>
+            </select>
+          </label>
+          <div class="colors">
+            <label><span>Background</span><input data-control="background" type="color"></label>
+            <label><span>Foreground</span><input data-control="foreground" type="color"></label>
+          </div>
+          <label class="toggle"><span>Transparent background</span><input data-control="backgroundTransparent" type="checkbox"></label>
+          <label class="toggle"><span>Transparent foreground</span><input data-control="foregroundTransparent" type="checkbox"></label>
+          <label><span>Palette, comma separated</span><input data-control="palette" type="text"></label>
+        </section>
+
+        <section>
+          <p class="section-label">04 / Motion + interaction</p>
+          <label class="toggle"><span>Autoplay</span><input data-control="autoplay" type="checkbox"></label>
+          <label><span>Animation duration</span><output></output><input data-control="animationDuration" type="range" min="0.1" max="5" step="0.05"></label>
+          <label class="toggle"><span>Ambient motion</span><input data-control="ambientEnabled" type="checkbox"></label>
+          <label><span>Ambient mode</span>
+            <select data-control="ambientMode">
+              <option value="drift">Drift</option>
+              <option value="wave">Wave</option>
+              <option value="orbit">Orbit</option>
+              <option value="pulse">Pulse</option>
+              <option value="jitter">Jitter</option>
+            </select>
+          </label>
+          <label><span>Ambient amount</span><output></output><input data-control="ambientAmount" type="range" min="0" max="2" step="0.01"></label>
+          <label><span>Ambient speed</span><output></output><input data-control="ambientSpeed" type="range" min="0" max="3" step="0.01"></label>
+          <label><span>Ambient frequency</span><output></output><input data-control="ambientFrequency" type="range" min="0.01" max="1" step="0.01"></label>
+          <label class="toggle"><span>Stagger reveal</span><input data-control="stagger" type="checkbox"></label>
+          <label><span>Stagger amount</span><output></output><input data-control="staggerAmount" type="range" min="0" max="0.95" step="0.01"></label>
+          <label><span>Stagger from</span>
+            <select data-control="staggerFrom">
+              <option value="start">Start</option>
+              <option value="center">Center</option>
+              <option value="end">End</option>
+              <option value="edges">Edges</option>
+              <option value="random">Random</option>
+            </select>
+          </label>
+          <label><span>Glyph scramble</span><output></output><input data-control="glyphScramble" type="range" min="0" max="1" step="0.01"></label>
+          <label><span>Mouse influence</span><output></output><input data-control="mouseInfluence" type="range" min="0" max="4" step="0.05"></label>
+          <label><span>Click ripple</span><output></output><input data-control="rippleStrength" type="range" min="0" max="4" step="0.05"></label>
+          <button type="button" class="reveal" data-reveal>Play GSAP reveal</button>
+        </section>
+
+        <section>
+          <p class="section-label">05 / Tone map</p>
+          <p class="hint">JSON maps luminance bands to blocks, dots, glyphs, lines or registered SVG symbols.</p>
+          <textarea data-tone-map rows="10" spellcheck="false"></textarea>
+          <button type="button" class="reveal" data-apply-tone>Apply tone map</button>
+          <label class="drop drop--small">
+            <span>Register multiple SVG symbols</span>
+            <strong>Choose SVGs</strong>
+            <input type="file" data-symbol accept=".svg,image/svg+xml" multiple>
+          </label>
+          <div class="tone-bands" data-tone-bands></div>
+        </section>
+      </aside>
+    </main>
+    <script type="module" src="/demo/main.ts"></script>
+  </body>
+</html>

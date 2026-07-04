@@ -1,0 +1,43 @@
+{
+  "name": "agency-dither-fx",
+  "version": "1.0.0",
+  "description": "Production-grade Canvas dither, halftone, ASCII and SVG-symbol effects.",
+  "type": "module",
+  "main": "./dist/agency-dither-fx.umd.cjs",
+  "module": "./dist/agency-dither-fx.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/agency-dither-fx.js",
+      "require": "./dist/agency-dither-fx.umd.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:lib": "tsc --emitDeclarationOnly && vite build --config vite.lib.config.ts",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "gsap": ">=3.12.0"
+  },
+  "peerDependenciesMeta": {
+    "gsap": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "gsap": "^3.15.0",
+    "sass": "^1.89.2",
+    "typescript": "^5.8.3",
+    "vite": "^8.0.16"
+  },
+  "license": "MIT",
+  "sideEffects": false
+}
