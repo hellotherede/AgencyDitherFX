@@ -8,6 +8,10 @@ activation, and an optional GSAP bridge.
 The package creates no per-cell DOM elements and can run several independent
 sections on one page.
 
+## Demo
+
+[Open the AgencyDitherFX playground](https://kubism-dev.github.io/AgencyDitherFX/)
+
 ## Current status
 
 Production-ready today:
