@@ -10,7 +10,7 @@ sections on one page.
 
 ## Demo
 
-[Open the AgencyDitherFX playground](https://kubism-dev.github.io/AgencyDitherFX/)
+[Open the AgencyDitherFX playground](https://hellotherede.github.io/AgencyDitherFX/)
 
 ## Current status
 
@@ -68,18 +68,21 @@ GSAP is an optional peer dependency.
 The host needs an explicit size:
 
 ```html
-<div class="dither-hero" data-dither-hero></div>
+<div
+	class="dither-hero"
+	data-dither-hero
+></div>
 ```
 
 ```css
 .dither-hero {
-  width: 100%;
-  min-height: 70svh;
-  overflow: hidden;
+	width: 100%;
+	min-height: 70svh;
+	overflow: hidden;
 }
 
 .dither-hero canvas {
-  display: block;
+	display: block;
 }
 ```
 
@@ -87,14 +90,14 @@ The host needs an explicit size:
 import { AgencyDitherFX } from 'agency-dither-fx';
 
 const fx = new AgencyDitherFX('[data-dither-hero]', {
-  source: '/media/portrait.jpg',
-  mode: 'dots',
-  algorithm: 'bayer8',
-  cellSize: 8,
-  foreground: '#171714',
-  background: '#f0ede5',
-  colorMode: 'brightness',
-  palette: ['#171714', '#ef5a37', '#f4be36', '#f0ede5']
+	source: '/media/portrait.jpg',
+	mode: 'dots',
+	algorithm: 'bayer8',
+	cellSize: 8,
+	foreground: '#171714',
+	background: '#f0ede5',
+	colorMode: 'brightness',
+	palette: ['#171714', '#ef5a37', '#f4be36', '#f0ede5'],
 });
 ```
 
@@ -109,11 +112,11 @@ respecting explicit limits:
 
 ```ts
 fx.set({
-  responsive: true,
-  cellSize: 10,
-  responsiveMinCellSize: 5,
-  responsiveMaxCellSize: 18,
-  responsiveReferenceWidth: 1200
+	responsive: true,
+	cellSize: 10,
+	responsiveMinCellSize: 5,
+	responsiveMaxCellSize: 18,
+	responsiveReferenceWidth: 1200,
 });
 ```
 
@@ -154,13 +157,10 @@ File input example:
 
 ```ts
 input.addEventListener('change', async () => {
-  const file = input.files?.[0];
-  if (!file) return;
+	const file = input.files?.[0];
+	if (!file) return;
 
-  await fx.setSource(
-    file,
-    file.type.startsWith('video/') ? 'video' : 'image'
-  );
+	await fx.setSource(file, file.type.startsWith('video/') ? 'video' : 'image');
 });
 ```
 
@@ -168,10 +168,10 @@ Changing modes or algorithms does not decode the source again:
 
 ```ts
 fx.set({
-  mode: 'ascii',
-  algorithm: 'bayer4',
-  glyphRamp: '.,-~:;=!*#$@',
-  invert: false
+	mode: 'ascii',
+	algorithm: 'bayer4',
+	glyphRamp: '.,-~:;=!*#$@',
+	invert: false,
 });
 ```
 
@@ -182,10 +182,7 @@ Load a second image or video once, then animate `sourceMix` from `0` to `1`:
 ```ts
 await fx.setSecondarySource('/media/portrait-alt.webp');
 
-fx.to(
-  { sourceMix: 1 },
-  { duration: 1.2, ease: 'power3.inOut' }
-);
+fx.to({ sourceMix: 1 }, { duration: 1.2, ease: 'power3.inOut' });
 ```
 
 Both sources use the same crop, sampling grid, visibility lifecycle, and video
@@ -200,13 +197,13 @@ Masks use sampled luminance. White reveals the effect and black hides it:
 await fx.setMaskSource('/masks/type-lockup.svg');
 
 fx.set({
-  maskThreshold: 0.35,
-  maskFeather: 0.12,
-  maskInvert: false,
-  maskFit: 'contain',
-  maskPositionX: 0.5,
-  maskPositionY: 0.35,
-  maskScale: 1.2
+	maskThreshold: 0.35,
+	maskFeather: 0.12,
+	maskInvert: false,
+	maskFit: 'contain',
+	maskPositionX: 0.5,
+	maskPositionY: 0.35,
+	maskScale: 1.2,
 });
 ```
 
@@ -216,15 +213,15 @@ the mask. Position values run from `0` to `1`; `0.5` centers the mask.
 
 ## Modes
 
-| Mode | Use |
-| --- | --- |
-| `dots` | Luminance-scaled circular field |
-| `blocks` | Square or rotated graphic grid |
-| `halftone` | Print-like circular halftone |
-| `ascii` | Canvas-rendered glyph field |
-| `symbols` | Registered SVG symbol field |
-| `hybrid` | Blocks, dots, and glyphs by tone |
-| `raw-dither` | Pixel-level dither output |
+| Mode         | Use                              |
+| ------------ | -------------------------------- |
+| `dots`       | Luminance-scaled circular field  |
+| `blocks`     | Square or rotated graphic grid   |
+| `halftone`   | Print-like circular halftone     |
+| `ascii`      | Canvas-rendered glyph field      |
+| `symbols`    | Registered SVG symbol field      |
+| `hybrid`     | Blocks, dots, and glyphs by tone |
+| `raw-dither` | Pixel-level dither output        |
 
 ## Algorithms
 
@@ -253,8 +250,8 @@ diffusion for stills, export, or intentionally low-resolution loops.
 
 ```ts
 fx.set({
-  colorMode: 'brightness',
-  palette: ['#11110f', '#544b3d', '#ef5a37', '#f4be36', '#f1eee7']
+	colorMode: 'brightness',
+	palette: ['#11110f', '#544b3d', '#ef5a37', '#f4be36', '#f1eee7'],
 });
 ```
 
@@ -269,8 +266,8 @@ Both base layers can be transparent:
 
 ```ts
 fx.set({
-  backgroundTransparent: true,
-  foregroundTransparent: false
+	backgroundTransparent: true,
+	foregroundTransparent: false,
 });
 ```
 
@@ -286,12 +283,12 @@ ASCII is rendered into Canvas, not individual DOM nodes:
 
 ```ts
 fx.set({
-  mode: 'ascii',
-  cellSize: 8,
-  glyphRamp: ' .:-=+*#%@',
-  fontFamily: '"DM Mono", monospace',
-  fontWeight: 500,
-  colorMode: 'source'
+	mode: 'ascii',
+	cellSize: 8,
+	glyphRamp: ' .:-=+*#%@',
+	fontFamily: '"DM Mono", monospace',
+	fontWeight: 500,
+	colorMode: 'source',
 });
 ```
 
@@ -365,8 +362,8 @@ Register custom symbols:
 
 ```ts
 await fx.registerSymbol(
-  'flower',
-  `<svg viewBox="0 0 100 100"><path d="..." /></svg>`
+	'flower',
+	`<svg viewBox="0 0 100 100"><path d="..." /></svg>`,
 );
 ```
 
@@ -374,33 +371,33 @@ Map symbols and primitives to luminance bands:
 
 ```ts
 fx.set({
-  mode: 'symbols',
-  toneMap: [
-    {
-      min: 0,
-      max: 0.2,
-      primitive: 'symbol',
-      symbol: 'square',
-      color: '#11110f',
-      scale: 1.1
-    },
-    {
-      min: 0.2,
-      max: 0.55,
-      primitive: 'symbol',
-      symbol: 'slash',
-      color: '#ef5a37',
-      scale: 0.9
-    },
-    {
-      min: 0.55,
-      max: 1,
-      primitive: 'symbol',
-      symbol: 'ring',
-      color: '#f1eee7',
-      scale: 0.7
-    }
-  ]
+	mode: 'symbols',
+	toneMap: [
+		{
+			min: 0,
+			max: 0.2,
+			primitive: 'symbol',
+			symbol: 'square',
+			color: '#11110f',
+			scale: 1.1,
+		},
+		{
+			min: 0.2,
+			max: 0.55,
+			primitive: 'symbol',
+			symbol: 'slash',
+			color: '#ef5a37',
+			scale: 0.9,
+		},
+		{
+			min: 0.55,
+			max: 1,
+			primitive: 'symbol',
+			symbol: 'ring',
+			color: '#f1eee7',
+			scale: 0.7,
+		},
+	],
 });
 ```
 
@@ -413,32 +410,32 @@ Tone bands also support art-directed movement:
 
 ```ts
 fx.set({
-  toneMap: [
-    {
-      min: 0,
-      max: 0.3,
-      primitive: 'symbol',
-      symbol: 'square',
-      color: '#11110f',
-      scale: 1,
-      offsetX: -0.25,
-      motionAmount: 0.15,
-      motionSpeed: 0.7,
-      revealOffset: 0
-    },
-    {
-      min: 0.3,
-      max: 1,
-      primitive: 'symbol',
-      symbol: 'star',
-      color: '#f4be36',
-      scale: 0.8,
-      offsetX: 0.2,
-      motionAmount: 0.45,
-      motionSpeed: 1.2,
-      revealOffset: 0.12
-    }
-  ]
+	toneMap: [
+		{
+			min: 0,
+			max: 0.3,
+			primitive: 'symbol',
+			symbol: 'square',
+			color: '#11110f',
+			scale: 1,
+			offsetX: -0.25,
+			motionAmount: 0.15,
+			motionSpeed: 0.7,
+			revealOffset: 0,
+		},
+		{
+			min: 0.3,
+			max: 1,
+			primitive: 'symbol',
+			symbol: 'star',
+			color: '#f4be36',
+			scale: 0.8,
+			offsetX: 0.2,
+			motionAmount: 0.45,
+			motionSpeed: 1.2,
+			revealOffset: 0.12,
+		},
+	],
 });
 ```
 
@@ -459,15 +456,15 @@ Use the built-in bridge:
 fx.params.revealProgress = 0;
 
 fx.to(
-  {
-    revealProgress: 1,
-    threshold: 0.58,
-    dotScale: 1.1
-  },
-  {
-    duration: fx.params.animationDuration,
-    ease: 'power3.inOut'
-  }
+	{
+		revealProgress: 1,
+		threshold: 0.58,
+		dotScale: 1.1,
+	},
+	{
+		duration: fx.params.animationDuration,
+		ease: 'power3.inOut',
+	},
 );
 ```
 
@@ -476,10 +473,10 @@ DOM nodes:
 
 ```ts
 fx.set({
-  stagger: true,
-  staggerAmount: 0.72,
-  staggerFrom: 'center',
-  animationDuration: 1.4
+	stagger: true,
+	staggerAmount: 0.72,
+	staggerFrom: 'center',
+	animationDuration: 1.4,
 });
 ```
 
@@ -493,11 +490,11 @@ ASCII, dots, blocks, symbols, and hybrid output:
 
 ```ts
 fx.set({
-  ambientEnabled: true,
-  ambientMode: 'wave',
-  ambientAmount: 0.3,
-  ambientSpeed: 0.6,
-  ambientFrequency: 0.18
+	ambientEnabled: true,
+	ambientMode: 'wave',
+	ambientAmount: 0.3,
+	ambientSpeed: 0.6,
+	ambientFrequency: 0.18,
 });
 ```
 
@@ -514,15 +511,15 @@ GSAP can animate the global field itself:
 
 ```ts
 fx.to(
-  {
-    ambientAmount: 0.8,
-    ambientSpeed: 1.2,
-    ambientFrequency: 0.3
-  },
-  {
-    duration: 1.5,
-    ease: 'power3.inOut'
-  }
+	{
+		ambientAmount: 0.8,
+		ambientSpeed: 1.2,
+		ambientFrequency: 0.3,
+	},
+	{
+		duration: 1.5,
+		ease: 'power3.inOut',
+	},
 );
 ```
 
@@ -533,11 +530,11 @@ Direct GSAP animation also works:
 
 ```ts
 gsap.to(fx.params, {
-  cellSize: 5,
-  contrast: 1.35,
-  duration: 1.2,
-  ease: 'expo.out',
-  onUpdate: () => fx.render()
+	cellSize: 5,
+	contrast: 1.35,
+	duration: 1.2,
+	ease: 'expo.out',
+	onUpdate: () => fx.render(),
 });
 ```
 
@@ -545,19 +542,23 @@ For multiple coordinated changes:
 
 ```ts
 const timeline = gsap.timeline({
-  defaults: { duration: 1, ease: 'power3.inOut' }
+	defaults: { duration: 1, ease: 'power3.inOut' },
 });
 
 timeline
-  .to(fx.params, {
-    revealProgress: 1,
-    onUpdate: () => fx.render()
-  })
-  .to(fx.params, {
-    primitiveMix: 0.8,
-    rotation: 45,
-    onUpdate: () => fx.render()
-  }, '<0.25');
+	.to(fx.params, {
+		revealProgress: 1,
+		onUpdate: () => fx.render(),
+	})
+	.to(
+		fx.params,
+		{
+			primitiveMix: 0.8,
+			rotation: 45,
+			onUpdate: () => fx.render(),
+		},
+		'<0.25',
+	);
 ```
 
 ## GSAP ScrollTrigger
@@ -574,27 +575,27 @@ AgencyDitherFX.useGSAP(gsap);
 
 const section = document.querySelector('[data-dither-section]');
 const fx = new AgencyDitherFX(section, {
-  source: '/media/portrait.webp',
-  mode: 'ascii',
-  algorithm: 'bayer8',
-  revealProgress: 0,
-  stagger: true,
-  staggerAmount: 0.75,
-  staggerFrom: 'edges'
+	source: '/media/portrait.webp',
+	mode: 'ascii',
+	algorithm: 'bayer8',
+	revealProgress: 0,
+	stagger: true,
+	staggerAmount: 0.75,
+	staggerFrom: 'edges',
 });
 
 const tween = gsap.to(fx.params, {
-  revealProgress: 1,
-  cellSize: 6,
-  contrast: 1.3,
-  ease: 'none',
-  onUpdate: () => fx.render(),
-  scrollTrigger: {
-    trigger: section,
-    start: 'top 80%',
-    end: 'bottom 35%',
-    scrub: 0.6
-  }
+	revealProgress: 1,
+	cellSize: 6,
+	contrast: 1.3,
+	ease: 'none',
+	onUpdate: () => fx.render(),
+	scrollTrigger: {
+		trigger: section,
+		start: 'top 80%',
+		end: 'bottom 35%',
+		scrub: 0.6,
+	},
 });
 
 // Route/component cleanup:
@@ -608,9 +609,9 @@ The convenience helper produces the same reveal:
 ```ts
 fx.params.revealProgress = 0;
 fx.scrollTrigger({
-  start: 'top 80%',
-  end: 'bottom 30%',
-  scrub: 0.6
+	start: 'top 80%',
+	end: 'bottom 30%',
+	scrub: 0.6,
 });
 ```
 
@@ -621,18 +622,21 @@ For responsive and reduced-motion timelines, use `gsap.matchMedia()` and call
 
 ```ts
 const instances = Array.from(
-  document.querySelectorAll<HTMLElement>('[data-agency-dither]')
-).map(element => new AgencyDitherFX(element, {
-  source: element.dataset.source,
-  mode: 'dots',
-  algorithm: 'bayer8',
-  cellSize: 12,
-  maxDpr: 1,
-  maxFps: 24
-}));
+	document.querySelectorAll<HTMLElement>('[data-agency-dither]'),
+).map(
+	(element) =>
+		new AgencyDitherFX(element, {
+			source: element.dataset.source,
+			mode: 'dots',
+			algorithm: 'bayer8',
+			cellSize: 12,
+			maxDpr: 1,
+			maxFps: 24,
+		}),
+);
 
 // On route leave:
-instances.forEach(instance => instance.destroy());
+instances.forEach((instance) => instance.destroy());
 ```
 
 All instances use one shared `requestAnimationFrame` scheduler. Hidden
@@ -642,9 +646,9 @@ instances leave that scheduler and pause owned video playback automatically.
 
 ```html
 <div
-  data-agency-dither
-  data-source="/media/portrait.jpg"
-  data-preset="editorial-bayer"
+	data-agency-dither
+	data-source="/media/portrait.jpg"
+	data-preset="editorial-bayer"
 ></div>
 ```
 
@@ -694,12 +698,12 @@ Built-in safeguards:
 
 Recommended starting budgets:
 
-| Placement | Cell size | DPR | FPS | Algorithm |
-| --- | ---: | ---: | ---: | --- |
-| Primary hero | 8–12 | 1.5 | 30–60 | Bayer/blue noise |
-| Secondary section | 12–18 | 1 | 24–30 | Bayer/threshold |
-| Repeated card | 16–24 | 1 | 15–24 | Bayer/threshold |
-| Error-diffusion still | 8–14 | 1 | One-shot | Floyd/Atkinson |
+| Placement             | Cell size | DPR |      FPS | Algorithm        |
+| --------------------- | --------: | --: | -------: | ---------------- |
+| Primary hero          |      8–12 | 1.5 |    30–60 | Bayer/blue noise |
+| Secondary section     |     12–18 |   1 |    24–30 | Bayer/threshold  |
+| Repeated card         |     16–24 |   1 |    15–24 | Bayer/threshold  |
+| Error-diffusion still |      8–14 |   1 | One-shot | Floyd/Atkinson   |
 
 Avoid full-screen, high-DPR video with `cellSize < 6` on Canvas. That is the
 point where a WebGL glyph atlas or shader renderer becomes the appropriate
@@ -708,9 +712,9 @@ engine.
 Monitor `agencydither:render` or use `getStats()`:
 
 ```ts
-fx.onRender(event => {
-  const { fps, cells, width, height, warning } = event.detail;
-  console.log({ fps, cells, width, height, warning });
+fx.onRender((event) => {
+	const { fps, cells, width, height, warning } = event.detail;
+	console.log({ fps, cells, width, height, warning });
 });
 ```
 
