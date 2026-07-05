@@ -7,21 +7,21 @@ import type {
   ToneBand
 } from '../core/types';
 import { hexToRgb, luminance } from '../utils/color';
-
-interface PointerState {
-  x: number;
-  y: number;
-  active: boolean;
-  rippleX: number;
-  rippleY: number;
-  rippleStarted: number;
-}
+import type { DitherRenderer, RendererPointerState } from './types';
 
 const clamp = (value: number, min = 0, max = 1): number =>
   Math.min(max, Math.max(min, value));
 
-export class CanvasRenderer {
+const hash = (x: number, y: number, seed: number): number => {
+  let value = Math.imul(x + seed * 1013, 374761393) ^
+    Math.imul(y + seed * 7919, 668265263);
+  value = Math.imul(value ^ (value >>> 13), 1274126177);
+  return ((value ^ (value >>> 16)) >>> 0) / 4294967295;
+};
+
+export class CanvasRenderer implements DitherRenderer {
   readonly canvas: HTMLCanvasElement;
+  readonly kind = 'canvas';
   private readonly context: CanvasRenderingContext2D;
   private readonly sampleCanvas = document.createElement('canvas');
   private readonly sampleContext: CanvasRenderingContext2D;
@@ -118,7 +118,7 @@ export class CanvasRenderer {
     source: SourceFrame,
     options: AgencyDitherOptions,
     time: number,
-    pointer: PointerState,
+    pointer: RendererPointerState,
     secondary?: SourceFrame | null,
     mask?: SourceFrame | null
   ): RenderStats {
@@ -126,6 +126,7 @@ export class CanvasRenderer {
     this.sampleInto(
       source,
       options,
+      time,
       this.sampleCanvas,
       this.sampleContext,
       this.samples,
@@ -135,6 +136,7 @@ export class CanvasRenderer {
       this.sampleInto(
         secondary,
         options,
+        time,
         this.secondaryCanvas,
         this.secondaryContext,
         this.secondarySamples,
@@ -147,6 +149,7 @@ export class CanvasRenderer {
       this.sampleInto(
         mask,
         options,
+        time,
         this.maskCanvas,
         this.maskContext,
         this.maskSamples,
@@ -185,7 +188,7 @@ export class CanvasRenderer {
       cells: this.columns * this.rows,
       width: this.canvas.width,
       height: this.canvas.height,
-      renderer: 'canvas',
+      renderer: this.kind,
       warning:
         this.columns * this.rows >= options.maxCells
           ? 'Cell count capped for performance'
@@ -238,6 +241,7 @@ export class CanvasRenderer {
   private sampleInto(
     source: SourceFrame,
     options: AgencyDitherOptions,
+    time: number,
     canvas: HTMLCanvasElement,
     context: CanvasRenderingContext2D,
     samples: Float32Array,
@@ -303,8 +307,14 @@ export class CanvasRenderer {
           options.gamma
         );
         value = options.invert ? 1 - value : value;
+        if (options.noiseAmount > 0) {
+          const x = index % width;
+          const y = Math.floor(index / width);
+          const frame = Math.floor(time * options.noiseSpeed * 0.02);
+          value += (hash(x, y, frame) - 0.5) * options.noiseAmount;
+        }
       }
-      samples[index] = value;
+      samples[index] = clamp(value);
     }
   }
 
@@ -329,9 +339,9 @@ export class CanvasRenderer {
     for (let index = 0; index < this.dithered.length; index += 1) {
       let value = clamp(this.maskSamples[index] ?? 1);
       if (options.maskInvert) value = 1 - value;
-      const alpha = threshold <= 0
+      const alpha = (threshold <= 0
         ? value
-        : clamp((value - threshold) / feather);
+        : clamp((value - threshold) / feather)) * clamp(options.maskProgress);
       this.maskSamples[index] = alpha;
       this.dithered[index] = (this.dithered[index] ?? 0) * alpha;
     }
@@ -371,7 +381,7 @@ export class CanvasRenderer {
   private drawCells(
     options: AgencyDitherOptions,
     time: number,
-    pointer: PointerState
+    pointer: RendererPointerState
   ): void {
     const cellWidth = this.cssWidth / this.columns;
     const cellHeight = this.cssHeight / this.rows;
@@ -459,6 +469,12 @@ export class CanvasRenderer {
             py += Math.sin(elapsed * 0.83 + spatial) * amount * cellHeight;
           }
         }
+        if (options.displacement > 0) {
+          const phase = sourceValue * Math.PI * 2 + time * 0.0004;
+          const amount = options.displacement;
+          px += Math.cos(phase + x * 0.17) * amount * cellWidth;
+          py += Math.sin(phase + y * 0.13) * amount * cellHeight;
+        }
         if (pointer.active && options.mouseInfluence > 0) {
           const distance = Math.hypot(px - pointer.x, py - pointer.y);
           if (distance < 140) {
@@ -526,6 +542,22 @@ export class CanvasRenderer {
       order = Math.min(1, Math.hypot(nx - 0.5, ny - 0.5) / Math.SQRT1_2);
     } else if (from === 'edges') {
       order = 1 - Math.min(1, Math.hypot(nx - 0.5, ny - 0.5) / Math.SQRT1_2);
+    } else if (from === 'left') {
+      order = nx;
+    } else if (from === 'right') {
+      order = 1 - nx;
+    } else if (from === 'top') {
+      order = ny;
+    } else if (from === 'bottom') {
+      order = 1 - ny;
+    } else if (from === 'top-left') {
+      order = (nx + ny) * 0.5;
+    } else if (from === 'top-right') {
+      order = (1 - nx + ny) * 0.5;
+    } else if (from === 'bottom-left') {
+      order = (nx + 1 - ny) * 0.5;
+    } else if (from === 'bottom-right') {
+      order = (2 - nx - ny) * 0.5;
     } else if (from === 'random') {
       const value = Math.imul(index + 1, 2654435761);
       order = ((value ^ (value >>> 16)) >>> 0) / 4294967295;
@@ -679,13 +711,22 @@ export class CanvasRenderer {
       const g = this.colors[offset + 1] ?? value * 255;
       const b = this.colors[offset + 2] ?? value * 255;
       let nearest = options.foreground;
+      let nearestRgb: [number, number, number] | null = null;
       let nearestDistance = Number.POSITIVE_INFINITY;
       for (const [color, pr, pg, pb] of this.paletteRgb) {
         const distance = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
         if (distance < nearestDistance) {
           nearest = color;
+          nearestRgb = [pr, pg, pb];
           nearestDistance = distance;
         }
+      }
+      const mix = clamp(options.paletteMix);
+      if (mix < 1 && nearestRgb) {
+        const mixedR = Math.round(r * (1 - mix) + nearestRgb[0] * mix);
+        const mixedG = Math.round(g * (1 - mix) + nearestRgb[1] * mix);
+        const mixedB = Math.round(b * (1 - mix) + nearestRgb[2] * mix);
+        return `rgb(${mixedR} ${mixedG} ${mixedB})`;
       }
       return nearest;
     }

@@ -25,6 +25,7 @@ Production-ready today:
 - Built-in and uploaded SVG symbols
 - Seven-band luminance mapping with per-band symbol, color, and scale
 - Per-band drift, offset, rotation, and reveal timing parameters
+- Directional and diagonal reveal sweeps through `staggerFrom`
 - Secondary image/video blending through an animatable `sourceMix`
 - Image, video, and SVG luminance masks with threshold and feather controls
 - GSAP-friendly parameters, stagger origins, and reveal animation
@@ -36,8 +37,11 @@ Production-ready today:
 
 Not implemented yet:
 
-- The `webgl` renderer option currently falls back to Canvas 2D
-- CPU error diffusion is throttled, but not moved into a Web Worker yet
+- Full WebGL feature parity. The experimental `webgl` renderer supports
+  `raw-dither`, `dots`, `blocks`, and `halftone` with realtime-safe
+  algorithms, then warns for Canvas-only features.
+- CPU error diffusion is throttled, but not moved into a Web Worker yet; the
+  `worker` flag is reserved and defaults to `false`
 - Automated browser and visual-regression tests
 - GPU glyph atlases for very dense full-screen ASCII video
 
@@ -58,6 +62,12 @@ During local package development:
 
 ```sh
 npm run dev
+```
+
+Run the package-level checks:
+
+```sh
+npm test
 ```
 
 Library output is written to `dist/` as ESM, UMD, and TypeScript declarations.
@@ -319,6 +329,7 @@ settings.
 
 Design-led presets include:
 
+- `left-scan-reveal`: blocky left-to-right reveal for scan-style entrances
 - `signal-bloom`: kinetic crosses, stars, rings, and hot signal colors
 - `runway-ghost`: restrained high-fashion ASCII with an edge reveal
 - `acid-registration`: misregistered campaign-print energy
@@ -481,7 +492,8 @@ fx.set({
 ```
 
 Valid `staggerFrom` values are `start`, `center`, `end`, `edges`, and
-`random`.
+`random`, plus directional sweeps from `left`, `right`, `top`, `bottom`,
+`top-left`, `top-right`, `bottom-left`, and `bottom-right`.
 
 ### Ambient renderer motion
 
@@ -692,6 +704,7 @@ Built-in safeguards:
 - Default DPR cap of `1.5`
 - Default maximum of `42,000` cells
 - Error diffusion limited to 12 FPS for animated sources
+- SSR package-import and GSAP callback regression tests
 - ResizeObserver instead of frame-by-frame layout reads
 - Reduced-motion handling
 - Full listener, observer, media, and scheduler cleanup
@@ -706,8 +719,9 @@ Recommended starting budgets:
 | Error-diffusion still |      8–14 |   1 | One-shot | Floyd/Atkinson   |
 
 Avoid full-screen, high-DPR video with `cellSize < 6` on Canvas. That is the
-point where a WebGL glyph atlas or shader renderer becomes the appropriate
-engine.
+point where the experimental WebGL renderer can help for `raw-dither`, dots,
+blocks, and halftone. ASCII and SVG-symbol workloads still need a future GPU
+glyph/symbol atlas before they get the same benefit.
 
 Monitor `agencydither:render` or use `getStats()`:
 

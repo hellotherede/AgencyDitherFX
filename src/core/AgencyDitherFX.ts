@@ -1,6 +1,8 @@
 import { getGsap, useGsap } from '../animation/gsapBridge';
 import { isErrorDiffusion } from '../algorithms/dither';
 import { CanvasRenderer } from '../renderers/CanvasRenderer';
+import { WebGLRenderer } from '../renderers/WebGLRenderer';
+import type { DitherRenderer } from '../renderers/types';
 import { SourceAdapter } from '../sources/SourceAdapter';
 import { scheduler } from '../utils/scheduler';
 import { DEFAULT_OPTIONS } from './defaults';
@@ -20,9 +22,9 @@ export class AgencyDitherFX {
   }
 
   readonly element: Container;
-  readonly canvas: HTMLCanvasElement;
+  canvas: HTMLCanvasElement;
   readonly params: AgencyDitherOptions;
-  private readonly renderer: CanvasRenderer;
+  private renderer: DitherRenderer;
   private readonly source = new SourceAdapter();
   private readonly secondarySource = new SourceAdapter();
   private readonly maskSource = new SourceAdapter();
@@ -82,7 +84,7 @@ export class AgencyDitherFX {
           });
     if (!(element instanceof HTMLCanvasElement)) element.append(this.canvas);
     this.params = this.mergeOptions(DEFAULT_OPTIONS, options);
-    this.renderer = new CanvasRenderer(this.canvas);
+    this.renderer = this.createRenderer(this.canvas);
     this.reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     this.canvas.setAttribute('role', 'img');
     if (this.params.decorative) this.canvas.setAttribute('aria-hidden', 'true');
@@ -177,6 +179,7 @@ export class AgencyDitherFX {
     this.assertAlive();
     const merged = this.mergeOptions(this.params, options);
     Object.assign(this.params, merged);
+    this.ensureRenderer();
     this.resize();
     this.requestRender();
     return this;
@@ -195,6 +198,7 @@ export class AgencyDitherFX {
     next.worker = this.params.worker;
     if (this.params.source) next.source = this.params.source;
     Object.assign(this.params, next);
+    this.ensureRenderer();
     this.resize();
     this.requestRender();
     return this;
@@ -306,7 +310,11 @@ export class AgencyDitherFX {
     return getGsap().fromTo(this.params, fromVars, {
       ...toVars,
       ...gsapVars,
-      onUpdate: () => this.requestRender()
+      onUpdate: () => {
+        this.requestRender();
+        const callback = gsapVars.onUpdate;
+        if (typeof callback === 'function') callback();
+      }
     });
   }
 
@@ -383,6 +391,42 @@ export class AgencyDitherFX {
     this.renderer.resize(rect.width || 1, rect.height || 1, this.params);
   }
 
+  private createRenderer(canvas: HTMLCanvasElement, kind = this.params.renderer): DitherRenderer {
+    if (kind === 'webgl') {
+      try {
+        return new WebGLRenderer(canvas);
+      } catch {
+        return new CanvasRenderer(canvas);
+      }
+    }
+    return new CanvasRenderer(canvas);
+  }
+
+  private ensureRenderer(): void {
+    if (this.params.renderer === this.renderer.kind) return;
+    if (this.element instanceof HTMLCanvasElement) {
+      this.renderer = this.createRenderer(this.canvas, this.params.renderer);
+      return;
+    }
+
+    const nextCanvas = Object.assign(document.createElement('canvas'), {
+      className: this.canvas.className
+    });
+    nextCanvas.setAttribute('role', this.canvas.getAttribute('role') ?? 'img');
+    if (this.canvas.getAttribute('aria-hidden') === 'true') {
+      nextCanvas.setAttribute('aria-hidden', 'true');
+    }
+    this.canvas.removeEventListener('pointermove', this.onPointerMove);
+    this.canvas.removeEventListener('pointerleave', this.onPointerLeave);
+    this.canvas.removeEventListener('pointerdown', this.onClick);
+    this.canvas.replaceWith(nextCanvas);
+    this.canvas = nextCanvas;
+    this.canvas.addEventListener('pointermove', this.onPointerMove, { passive: true });
+    this.canvas.addEventListener('pointerleave', this.onPointerLeave, { passive: true });
+    this.canvas.addEventListener('pointerdown', this.onClick, { passive: true });
+    this.renderer = this.createRenderer(this.canvas, this.params.renderer);
+  }
+
   private trackFps(time: number): void {
     this.frameTimes.push(time);
     while (this.frameTimes.length && time - (this.frameTimes[0] ?? time) > 1000) {
@@ -391,8 +435,8 @@ export class AgencyDitherFX {
     this.stats.fps = Math.max(0, this.frameTimes.length - 1);
     if (isErrorDiffusion(this.params.algorithm) && this.source.current?.dynamic) {
       this.stats.warning = 'Error diffusion is throttled for animated sources';
-    } else if (this.params.renderer !== 'canvas') {
-      this.stats.warning = `${this.params.renderer} requested; Canvas fallback is active`;
+    } else if (this.params.renderer !== this.stats.renderer) {
+      this.stats.warning = `${this.params.renderer} requested; ${this.stats.renderer} fallback is active`;
     }
   }
 
@@ -400,16 +444,36 @@ export class AgencyDitherFX {
     base: AgencyDitherOptions,
     update: Partial<AgencyDitherOptions>
   ): AgencyDitherOptions {
-    return {
+    const animation = { ...base.animation, ...update.animation };
+    const merged: AgencyDitherOptions = {
       ...base,
       ...update,
-      animation: { ...base.animation, ...update.animation },
+      animation,
       interaction: { ...base.interaction, ...update.interaction },
       palette: update.palette ? [...update.palette] : base.palette,
       toneMap: update.toneMap
         ? update.toneMap.map(item => ({ ...item }))
         : base.toneMap
     };
+    if (update.animation?.noiseSpeed !== undefined && update.noiseSpeed === undefined) {
+      merged.noiseSpeed = update.animation.noiseSpeed;
+    }
+    if (update.noiseSpeed !== undefined && update.animation?.noiseSpeed === undefined) {
+      merged.animation.noiseSpeed = update.noiseSpeed;
+    }
+    if (
+      update.animation?.glyphScramble !== undefined &&
+      update.glyphScramble === undefined
+    ) {
+      merged.glyphScramble = update.animation.glyphScramble;
+    }
+    if (
+      update.glyphScramble !== undefined &&
+      update.animation?.glyphScramble === undefined
+    ) {
+      merged.animation.glyphScramble = update.glyphScramble;
+    }
+    return merged;
   }
 
   private assertAlive(): void {

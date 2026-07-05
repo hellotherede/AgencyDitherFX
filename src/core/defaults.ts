@@ -74,7 +74,7 @@ export const DEFAULT_OPTIONS: AgencyDitherOptions = {
   },
   immediate: false,
   decorative: true,
-  worker: true
+  worker: false
 };
 
 export const REALTIME_ALGORITHMS = new Set([

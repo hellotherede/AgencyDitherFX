@@ -46,6 +46,38 @@ function isVideoUrl(value: string): boolean {
   return /\.(mp4|webm|ogv|mov)(?:$|[?#])/i.test(value);
 }
 
+function waitForImage(image: HTMLImageElement): Promise<void> {
+  if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) {
+    return Promise.resolve();
+  }
+  return image.decode();
+}
+
+function waitForVideoMetadata(video: HTMLVideoElement): Promise<void> {
+  if (video.videoWidth > 0 && video.videoHeight > 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      video.removeEventListener('loadedmetadata', onReady);
+      video.removeEventListener('loadeddata', onReady);
+      video.removeEventListener('error', onError);
+    };
+    const onReady = (): void => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onError = (): void => {
+      cleanup();
+      reject(new Error('AgencyDitherFX could not load video metadata.'));
+    };
+    video.addEventListener('loadedmetadata', onReady);
+    video.addEventListener('loadeddata', onReady);
+    video.addEventListener('error', onError);
+    if (!video.srcObject) video.load();
+  });
+}
+
 export class SourceAdapter {
   private ownedVideo: HTMLVideoElement | null = null;
   private streamVideo: HTMLVideoElement | null = null;
@@ -87,10 +119,12 @@ export class SourceAdapter {
     }
 
     if (drawable instanceof HTMLVideoElement) {
+      await waitForVideoMetadata(drawable);
       width = drawable.videoWidth;
       height = drawable.videoHeight;
       dynamic = true;
     } else if (drawable instanceof HTMLImageElement) {
+      await waitForImage(drawable);
       width = drawable.naturalWidth;
       height = drawable.naturalHeight;
     } else if (drawable instanceof HTMLCanvasElement) {

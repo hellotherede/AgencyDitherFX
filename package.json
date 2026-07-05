@@ -23,7 +23,8 @@
     "build:pages": "tsc --noEmit && vite build --mode github-pages",
     "build:lib": "tsc --emitDeclarationOnly && vite build --config vite.lib.config.ts",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build:lib && node --test tests/*.test.mjs"
   },
   "peerDependencies": {
     "gsap": ">=3.12.0"
