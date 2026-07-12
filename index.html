@@ -109,10 +109,16 @@
             <span>Renderer</span>
             <select data-control="renderer">
               <option value="canvas">Canvas 2D</option>
-              <option value="webgl">WebGL (fallback)</option>
-              <option value="svg">SVG (fallback)</option>
+              <option value="webgl">WebGL + automatic fallback</option>
+              <option value="svg">SVG request (Canvas fallback)</option>
             </select>
           </label>
+          <div class="renderer-state" data-renderer-state aria-live="polite">
+            <strong data-renderer-active>Canvas active</strong>
+            <span data-renderer-note>Full Canvas feature path.</span>
+          </div>
+          <button type="button" class="reveal" data-webgl-safe>Try WebGL-safe setup</button>
+          <p class="hint">WebGL accelerates dots, blocks, halftone and raw dither. ASCII, symbols, hybrid, masks and other Canvas-only controls switch renderers automatically.</p>
         </section>
 
         <section>
@@ -177,6 +183,14 @@
               <option value="center">Center</option>
               <option value="end">End</option>
               <option value="edges">Edges</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="top">Top</option>
+              <option value="bottom">Bottom</option>
+              <option value="top-left">Top left</option>
+              <option value="top-right">Top right</option>
+              <option value="bottom-left">Bottom left</option>
+              <option value="bottom-right">Bottom right</option>
               <option value="random">Random</option>
             </select>
           </label>

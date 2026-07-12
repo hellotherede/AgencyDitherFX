@@ -15,6 +15,7 @@ export interface DitherRenderer {
   resize(width: number, height: number, options: AgencyDitherOptions): void;
   setSymbol(name: string, image: CanvasImageSource): void;
   removeSymbol(name: string): void;
+  destroy(): void;
   render(
     source: SourceFrame,
     options: AgencyDitherOptions,

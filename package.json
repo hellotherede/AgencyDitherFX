@@ -2,6 +2,19 @@
   "name": "agency-dither-fx",
   "version": "1.0.0",
   "description": "Production-grade Canvas dither, halftone, ASCII and SVG-symbol effects.",
+  "keywords": [
+    "ascii-art",
+    "canvas",
+    "dithering",
+    "halftone",
+    "webgl"
+  ],
+  "homepage": "https://hellotherede.github.io/AgencyDitherFX/",
+  "bugs": "https://github.com/hellotherede/AgencyDitherFX/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hellotherede/AgencyDitherFX.git"
+  },
   "type": "module",
   "main": "./dist/agency-dither-fx.umd.cjs",
   "module": "./dist/agency-dither-fx.js",
@@ -15,16 +28,18 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "build:pages": "tsc --noEmit && vite build --mode github-pages",
-    "build:lib": "tsc --emitDeclarationOnly && vite build --config vite.lib.config.ts",
+    "build:lib": "vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build:lib && node --test tests/*.test.mjs"
+    "test": "npm run build:lib && node --test tests/*.test.mjs",
+    "prepack": "npm test"
   },
   "peerDependencies": {
     "gsap": ">=3.12.0"
@@ -41,5 +56,8 @@
     "vite": "^8.0.16"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "sideEffects": false
 }

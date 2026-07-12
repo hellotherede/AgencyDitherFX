@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { access, readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   AgencyDitherFX,
@@ -7,6 +10,24 @@ import {
   isErrorDiffusion,
   presets
 } from '../dist/agency-dither-fx.js';
+
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+test('every published package entry exists after the library build', async () => {
+  const packageJson = JSON.parse(
+    await readFile(resolve(projectRoot, 'package.json'), 'utf8')
+  );
+  const entries = new Set([
+    packageJson.main,
+    packageJson.module,
+    packageJson.types,
+    ...Object.values(packageJson.exports['.'])
+  ]);
+
+  await Promise.all(
+    [...entries].map(entry => access(resolve(projectRoot, entry)))
+  );
+});
 
 test('package import is SSR-safe and exposes expected defaults', () => {
   assert.equal(DEFAULT_OPTIONS.renderer, 'canvas');
@@ -22,6 +43,12 @@ test('constructor gives a DOM-specific error outside the browser', () => {
     () => new AgencyDitherFX('[data-missing]'),
     /browser DOM/
   );
+});
+
+test('public lifecycle event helpers are available', () => {
+  assert.equal(typeof AgencyDitherFX.prototype.onRender, 'function');
+  assert.equal(typeof AgencyDitherFX.prototype.onError, 'function');
+  assert.equal(typeof AgencyDitherFX.prototype.destroy, 'function');
 });
 
 test('fromTo keeps caller onUpdate while requesting a render', () => {

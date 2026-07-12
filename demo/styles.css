@@ -97,6 +97,25 @@ main {
 
 .section-label { margin: 0; font-weight: 500; text-transform: uppercase; }
 .hint { margin: -5px 0 0; opacity: .55; }
+.renderer-state {
+  display: grid;
+  gap: 3px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  background: rgb(255 255 255 / 16%);
+}
+
+.renderer-state strong {
+  font: 700 12px 'Syne', sans-serif;
+  letter-spacing: -.02em;
+  text-transform: uppercase;
+}
+
+.renderer-state span { font-size: 9px; opacity: .65; }
+.renderer-state--fallback {
+  border-color: var(--signal);
+  background: rgb(239 90 55 / 10%);
+}
 .controls label:not(.drop) {
   display: grid;
   grid-template-columns: 1fr auto;

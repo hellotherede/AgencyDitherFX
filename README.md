@@ -34,12 +34,15 @@ Production-ready today:
 - DPR, FPS, and cell-count limits
 - Config, HTML, and PNG export in the playground
 - SSR-safe module imports and complete instance cleanup
+- Race-safe source replacement when asynchronous loads overlap
 
 Not implemented yet:
 
 - Full WebGL feature parity. The experimental `webgl` renderer supports
   `raw-dither`, `dots`, `blocks`, and `halftone` with realtime-safe
-  algorithms, then warns for Canvas-only features.
+  algorithms. ASCII, symbols, hybrid output, error diffusion, masks, tone
+  maps, palette modes, and Canvas-native motion automatically use the Canvas
+  renderer so the requested effect remains visually correct.
 - CPU error diffusion is throttled, but not moved into a Web Worker yet; the
   `worker` flag is reserved and defaults to `false`
 - Automated browser and visual-regression tests
@@ -114,6 +117,10 @@ const fx = new AgencyDitherFX('[data-dither-hero]', {
 Instances lazy-start near the viewport by default. Use `immediate: true` only
 for an above-the-fold effect that must initialize immediately.
 
+Sources passed to the constructor are also deferred until the instance enters
+the 160px viewport margin. An explicit `setSource()` call loads immediately,
+which is useful when the host application already controls preloading.
+
 ## Responsive sizing and source fit
 
 The canvas follows its host through `ResizeObserver`. Responsive density is
@@ -161,6 +168,19 @@ Masks expose the same fit modes plus independent X/Y position and scale.
 ```ts
 await fx.setSource('/media/editorial.webp');
 await fx.setSource('/media/loop.webm', 'video');
+```
+
+Explicit source changes reject when loading or decoding fails. Sources passed
+to the constructor report failures through `agencydither:error` so they do not
+create unhandled promise rejections:
+
+```ts
+const removeErrorListener = fx.onError(event => {
+	console.error(event.detail);
+});
+
+// During cleanup:
+removeErrorListener();
 ```
 
 File input example:
@@ -684,7 +704,7 @@ initialize the exported element with the package.
 
 ## Performance
 
-The production library currently builds to roughly 12 KB gzip, excluding GSAP.
+The production library currently builds to roughly 18 KB gzip, excluding GSAP.
 Runtime cost depends mostly on cell count, source type, and algorithm.
 Adding source B or a mask adds another low-resolution sampling pass. Using
 both roughly triples source sampling work, although primitive drawing remains
@@ -696,8 +716,10 @@ Built-in safeguards:
 - No per-cell DOM nodes
 - No repeated sample-canvas or typed-array allocation after resize
 - Cached raw-image buffers, glyph ramps, tone lookup tables, and palette RGB
+- Static primary, secondary, and mask sampling caches during animated reveals
 - Quantized source-color string cache capped to 4,096 possible colors
 - Image decode promise cache for repeated URLs
+- Image cache capped at 64 recently used URLs
 - Automatic viewport pause/resume
 - Still images render only when dirty
 - Configurable video and animation FPS
@@ -721,25 +743,99 @@ Recommended starting budgets:
 Avoid full-screen, high-DPR video with `cellSize < 6` on Canvas. That is the
 point where the experimental WebGL renderer can help for `raw-dither`, dots,
 blocks, and halftone. ASCII and SVG-symbol workloads still need a future GPU
-glyph/symbol atlas before they get the same benefit.
+glyph/symbol atlas before they get the same benefit. Requesting `webgl` with
+one of those features transparently falls back to Canvas and reports the
+reason through `warning`; returning to a compatible configuration restores
+WebGL automatically.
 
 Monitor `agencydither:render` or use `getStats()`:
 
 ```ts
 fx.onRender((event) => {
-	const { fps, cells, width, height, warning } = event.detail;
-	console.log({ fps, cells, width, height, warning });
+	const { fps, cells, width, height, warning, sampleMs, ditherMs, drawMs } =
+		event.detail;
+	console.log({
+		fps,
+		cells,
+		width,
+		height,
+		warning,
+		sampleMs,
+		ditherMs,
+		drawMs,
+	});
 });
 ```
+
+The optional timing fields separate source sampling, dithering/masking, and
+primitive drawing cost. Static sources should report near-zero sampling time
+after their first frame unless a sampling-related option changes.
 
 ## Accessibility
 
 - Decorative canvases are `aria-hidden` by default.
-- Set `decorative: false` when the rendered media conveys content.
+- Set `decorative: false` and provide `ariaLabel` when the rendered media
+  conveys content.
 - Provide meaningful fallback content or a fallback image.
 - Do not replace essential text with canvas ASCII.
 - Reduced motion suppresses decorative loops.
-- Lazy initialization avoids competing with LCP by default.
+- Below-the-fold source loading avoids competing with LCP by default.
+
+## Lighthouse and Core Web Vitals
+
+For a primary hero, keep a normal responsive image as the LCP element and use
+AgencyDitherFX as a progressively enhanced overlay. Supplying the decoded
+`HTMLImageElement` reuses the browser's responsive image selection and avoids
+a second media request:
+
+```html
+<section class="hero">
+	<img
+		id="hero-image"
+		src="/media/hero-1280.avif"
+		srcset="/media/hero-768.avif 768w, /media/hero-1280.avif 1280w"
+		sizes="100vw"
+		width="1280"
+		height="720"
+		fetchpriority="high"
+		alt="Campaign description"
+	/>
+	<div class="hero-effect" aria-hidden="true"></div>
+</section>
+```
+
+```ts
+const image = document.querySelector<HTMLImageElement>('#hero-image')!;
+await image.decode();
+
+const fx = new AgencyDitherFX('.hero-effect', {
+	source: image,
+	immediate: true,
+	decorative: true,
+	cellSize: 10,
+	maxDpr: 1,
+	maxFps: 30,
+	algorithm: 'bayer8',
+});
+```
+
+Core Web Vitals guidance:
+
+- Give every host a fixed height, `aspect-ratio`, or intrinsic placeholder to
+  prevent CLS.
+- Do not set `immediate: true` on below-the-fold sections. Constructor media
+  remains unfetched until the section approaches the viewport.
+- Prefer ordered dithering and 24–30 FPS for motion; reserve error diffusion
+  for still images.
+- Start heroes around `maxDpr: 1` and `cellSize: 8–12`, then raise quality only
+  after measuring representative mobile hardware.
+- Keep a semantic image or text fallback. Canvas should enhance essential
+  content rather than become its only representation.
+- Avoid eager video, secondary sources, and animated masks during initial page
+  load. Add them after interaction or when their section becomes relevant.
+- The shared scheduler and owned videos suspend while the document is hidden.
+- Use the render timing fields to identify whether sampling, dithering, or
+  primitive drawing is consuming the frame budget.
 
 ## Cleanup
 
@@ -778,8 +874,9 @@ Primary methods:
 - `exportConfig()`
 - `exportMarkup()`
 - `onRender(listener)`
+- `onError(listener)`
 - `destroy()`
 
 ## License
 
-MIT
+[MIT](./LICENSE)

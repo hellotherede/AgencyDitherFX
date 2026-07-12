@@ -19,6 +19,18 @@ const hash = (x: number, y: number, seed: number): number => {
   return ((value ^ (value >>> 16)) >>> 0) / 4294967295;
 };
 
+type SamplePlacement = {
+  fit: AgencyDitherOptions['fit'];
+  positionX: number;
+  positionY: number;
+  scale: number;
+};
+
+type SampleCache = {
+  source: SourceFrame | null;
+  signature: string;
+};
+
 export class CanvasRenderer implements DitherRenderer {
   readonly canvas: HTMLCanvasElement;
   readonly kind = 'canvas';
@@ -34,10 +46,15 @@ export class CanvasRenderer implements DitherRenderer {
   private samples = new Float32Array(0);
   private dithered = new Float32Array(0);
   private colors = new Uint8ClampedArray(0);
+  private primarySamples = new Float32Array(0);
+  private primaryColors = new Uint8ClampedArray(0);
   private secondarySamples = new Float32Array(0);
   private secondaryColors = new Uint8ClampedArray(0);
+  private rawMaskSamples = new Float32Array(0);
   private maskSamples = new Float32Array(0);
-  private maskColors = new Uint8ClampedArray(0);
+  private primaryCache: SampleCache = { source: null, signature: '' };
+  private secondaryCache: SampleCache = { source: null, signature: '' };
+  private maskCache: SampleCache = { source: null, signature: '' };
   private rawImageData: ImageData | null = null;
   private maskActive = false;
   private glyphRampSource = '';
@@ -114,6 +131,16 @@ export class CanvasRenderer implements DitherRenderer {
     if (this.firstSymbol === name) this.firstSymbol = this.symbols.keys().next().value ?? '';
   }
 
+  destroy(): void {
+    this.symbols.clear();
+    this.tintedSymbols.clear();
+    this.sourceColorCache.clear();
+    this.sampleCanvas.width = 0;
+    this.secondaryCanvas.width = 0;
+    this.maskCanvas.width = 0;
+    this.rawCanvas.width = 0;
+  }
+
   render(
     source: SourceFrame,
     options: AgencyDitherOptions,
@@ -123,37 +150,43 @@ export class CanvasRenderer implements DitherRenderer {
     mask?: SourceFrame | null
   ): RenderStats {
     this.prepareGrid(options);
-    this.sampleInto(
+    const sampleStarted = performance.now();
+    this.sampleIntoCached(
       source,
       options,
       time,
       this.sampleCanvas,
       this.sampleContext,
-      this.samples,
-      this.colors
+      this.primarySamples,
+      this.primaryColors,
+      this.primaryCache
     );
+    this.samples.set(this.primarySamples);
+    this.colors.set(this.primaryColors);
     if (secondary?.ready && options.sourceMix > 0) {
-      this.sampleInto(
+      this.sampleIntoCached(
         secondary,
         options,
         time,
         this.secondaryCanvas,
         this.secondaryContext,
         this.secondarySamples,
-        this.secondaryColors
+        this.secondaryColors,
+        this.secondaryCache
       );
       this.blendSources(options.sourceMix);
     }
     if (mask?.ready) {
       this.maskActive = true;
-      this.sampleInto(
+      this.sampleIntoCached(
         mask,
         options,
         time,
         this.maskCanvas,
         this.maskContext,
-        this.maskSamples,
-        this.maskColors,
+        this.rawMaskSamples,
+        undefined,
+        this.maskCache,
         {
           fit: options.maskFit,
           positionX: options.maskPositionX,
@@ -161,9 +194,11 @@ export class CanvasRenderer implements DitherRenderer {
           scale: options.maskScale
         }
       );
+      this.maskSamples.set(this.rawMaskSamples);
     } else {
       this.maskActive = false;
     }
+    const sampleFinished = performance.now();
     ditherSamples(
       this.samples,
       this.dithered,
@@ -175,6 +210,7 @@ export class CanvasRenderer implements DitherRenderer {
       Math.floor(time * options.noiseSpeed * 0.02)
     );
     if (this.maskActive) this.applyMask(options);
+    const ditherFinished = performance.now();
     this.clear(options);
     if (options.mode === 'raw-dither') {
       this.drawRaw(options);
@@ -183,12 +219,16 @@ export class CanvasRenderer implements DitherRenderer {
       this.preparePalette(options.palette);
       this.drawCells(options, time, pointer);
     }
+    const drawFinished = performance.now();
     return {
       fps: 0,
       cells: this.columns * this.rows,
       width: this.canvas.width,
       height: this.canvas.height,
       renderer: this.kind,
+      sampleMs: sampleFinished - sampleStarted,
+      ditherMs: ditherFinished - sampleFinished,
+      drawMs: drawFinished - ditherFinished,
       warning:
         this.columns * this.rows >= options.maxCells
           ? 'Cell count capped for performance'
@@ -222,11 +262,17 @@ export class CanvasRenderer implements DitherRenderer {
     this.samples = new Float32Array(size);
     this.dithered = new Float32Array(size);
     this.colors = new Uint8ClampedArray(size * 4);
+    this.primarySamples = new Float32Array(size);
+    this.primaryColors = new Uint8ClampedArray(size * 4);
     this.secondarySamples = new Float32Array(size);
     this.secondaryColors = new Uint8ClampedArray(size * 4);
+    this.rawMaskSamples = new Float32Array(size);
+    this.rawMaskSamples.fill(1);
     this.maskSamples = new Float32Array(size);
     this.maskSamples.fill(1);
-    this.maskColors = new Uint8ClampedArray(size * 4);
+    this.primaryCache = { source: null, signature: '' };
+    this.secondaryCache = { source: null, signature: '' };
+    this.maskCache = { source: null, signature: '' };
     this.sampleCanvas.width = columns;
     this.sampleCanvas.height = rows;
     this.secondaryCanvas.width = columns;
@@ -238,6 +284,63 @@ export class CanvasRenderer implements DitherRenderer {
     this.rawImageData = this.rawContext.createImageData(columns, rows);
   }
 
+  private sampleIntoCached(
+    source: SourceFrame,
+    options: AgencyDitherOptions,
+    time: number,
+    canvas: HTMLCanvasElement,
+    context: CanvasRenderingContext2D,
+    samples: Float32Array,
+    colors: Uint8ClampedArray | undefined,
+    cache: SampleCache,
+    placement?: SamplePlacement
+  ): void {
+    const signature = this.sampleSignature(options, time, canvas, placement);
+    if (!source.dynamic && cache.source === source && cache.signature === signature) return;
+    this.sampleInto(source, options, time, canvas, context, samples, colors, placement);
+    cache.source = source;
+    cache.signature = signature;
+  }
+
+  private sampleSignature(
+    options: AgencyDitherOptions,
+    time: number,
+    canvas: HTMLCanvasElement,
+    placement?: SamplePlacement
+  ): string {
+    const active = placement ?? {
+      fit: options.fit,
+      positionX: 0.5,
+      positionY: 0.5,
+      scale: 1
+    };
+    const transform = placement
+      ? 'mask'
+      : [
+          options.background,
+          options.blur,
+          options.contrast,
+          options.brightness,
+          options.gamma,
+          options.invert,
+          options.noiseAmount,
+          options.noiseAmount > 0
+            ? Math.floor(time * options.noiseSpeed * 0.02)
+            : 0
+        ].join(':');
+    return [
+      canvas.width,
+      canvas.height,
+      this.cssWidth,
+      this.cssHeight,
+      active.fit,
+      active.positionX,
+      active.positionY,
+      active.scale,
+      transform
+    ].join('|');
+  }
+
   private sampleInto(
     source: SourceFrame,
     options: AgencyDitherOptions,
@@ -245,13 +348,8 @@ export class CanvasRenderer implements DitherRenderer {
     canvas: HTMLCanvasElement,
     context: CanvasRenderingContext2D,
     samples: Float32Array,
-    colors: Uint8ClampedArray,
-    placement?: {
-      fit: AgencyDitherOptions['fit'];
-      positionX: number;
-      positionY: number;
-      scale: number;
-    }
+    colors?: Uint8ClampedArray,
+    placement?: SamplePlacement
   ): void {
     const { width, height } = canvas;
     const isMask = Boolean(placement);
@@ -292,7 +390,7 @@ export class CanvasRenderer implements DitherRenderer {
     context.drawImage(source.drawable, dx, dy, drawWidth, drawHeight);
     context.restore();
     const image = context.getImageData(0, 0, width, height);
-    colors.set(image.data);
+    colors?.set(image.data);
 
     for (let index = 0; index < samples.length; index += 1) {
       const offset = index * 4;
@@ -394,6 +492,8 @@ export class CanvasRenderer implements DitherRenderer {
     this.context.textAlign = 'center';
     this.context.textBaseline = 'middle';
     this.context.font = `${options.fontWeight} ${Math.max(2, cellHeight * 0.98)}px ${options.fontFamily}`;
+    let currentColor = '';
+    let currentAlpha = 1;
 
     for (let y = 0; y < this.rows; y += 1) {
       for (let x = 0; x < this.columns; x += 1) {
@@ -499,9 +599,16 @@ export class CanvasRenderer implements DitherRenderer {
           (0.15 + value * 0.85) *
           (0.35 + revealAmount * 0.65) *
           ambientScale;
-        this.context.globalAlpha = revealAmount * maskValue;
-        this.context.fillStyle = color;
-        this.context.strokeStyle = color;
+        const alpha = revealAmount * maskValue;
+        if (alpha !== currentAlpha) {
+          this.context.globalAlpha = alpha;
+          currentAlpha = alpha;
+        }
+        if (color !== currentColor) {
+          this.context.fillStyle = color;
+          this.context.strokeStyle = color;
+          currentColor = color;
+        }
         this.drawPrimitive(
           primitive,
           px,
@@ -516,9 +623,9 @@ export class CanvasRenderer implements DitherRenderer {
           index,
           time
         );
-        this.context.globalAlpha = 1;
       }
     }
+    if (currentAlpha !== 1) this.context.globalAlpha = 1;
   }
 
   private cellReveal(
@@ -592,9 +699,19 @@ export class CanvasRenderer implements DitherRenderer {
       return;
     }
     if (primitive === 'block') {
+      const rotation = options.rotation + (band?.rotation ?? 0);
+      if (rotation === 0) {
+        this.context.fillRect(
+          x - width * scale * 0.5,
+          y - height * scale * 0.5,
+          width * scale,
+          height * scale
+        );
+        return;
+      }
       this.context.save();
       this.context.translate(x, y);
-      this.context.rotate((options.rotation + (band?.rotation ?? 0)) * Math.PI / 180);
+      this.context.rotate(rotation * Math.PI / 180);
       this.context.fillRect(-width * scale * 0.5, -height * scale * 0.5, width * scale, height * scale);
       this.context.restore();
       return;

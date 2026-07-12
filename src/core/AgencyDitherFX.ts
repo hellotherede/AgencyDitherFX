@@ -9,12 +9,14 @@ import { DEFAULT_OPTIONS } from './defaults';
 import type {
   AgencyDitherOptions,
   GsapLike,
+  RendererKind,
   RenderStats,
   SourceInput
 } from './types';
 
 type Container = HTMLElement | HTMLCanvasElement;
 type Listener = (event: CustomEvent<RenderStats>) => void;
+type ErrorListener = (event: CustomEvent<Error>) => void;
 
 export class AgencyDitherFX {
   static useGSAP(gsap: GsapLike): void {
@@ -25,15 +27,19 @@ export class AgencyDitherFX {
   canvas: HTMLCanvasElement;
   readonly params: AgencyDitherOptions;
   private renderer: DitherRenderer;
+  private rendererSelection: string;
   private readonly source = new SourceAdapter();
   private readonly secondarySource = new SourceAdapter();
   private readonly maskSource = new SourceAdapter();
+  private readonly symbols = new Map<string, CanvasImageSource>();
   private readonly resizeObserver: ResizeObserver;
   private readonly visibilityObserver: IntersectionObserver;
   private readonly reducedMotion: MediaQueryList;
   private running = false;
   private visible = false;
+  private intersectionKnown = false;
   private destroyed = false;
+  private pendingInitialSource: SourceInput | null = null;
   private dirty = true;
   private oneShot = false;
   private lastRender = 0;
@@ -57,7 +63,9 @@ export class AgencyDitherFX {
     if (this.params.interaction.pointer) this.requestRender();
   };
   private readonly onPointerLeave = (): void => {
+    const wasActive = this.pointer.active;
     this.pointer.active = false;
+    if (wasActive && this.params.interaction.pointer) this.requestRender();
   };
   private readonly onClick = (event: PointerEvent): void => {
     if (!this.params.interaction.clickRipple) return;
@@ -66,6 +74,22 @@ export class AgencyDitherFX {
     this.pointer.rippleY = event.clientY - rect.top;
     this.pointer.rippleStarted = performance.now();
     this.start();
+  };
+  private readonly onReducedMotionChange = (): void => {
+    if (!this.destroyed) this.requestRender();
+  };
+  private readonly onWebGLRestored = (): void => {
+    this.requestRender();
+  };
+  private readonly onDocumentVisibilityChange = (): void => {
+    if (document.hidden) {
+      scheduler.remove(this);
+      this.source.pause();
+      this.secondarySource.pause();
+      this.maskSource.pause();
+      return;
+    }
+    if (this.isActive()) this.activate();
   };
 
   constructor(target: string | Container, options: Partial<AgencyDitherOptions> = {}) {
@@ -84,14 +108,14 @@ export class AgencyDitherFX {
           });
     if (!(element instanceof HTMLCanvasElement)) element.append(this.canvas);
     this.params = this.mergeOptions(DEFAULT_OPTIONS, options);
-    this.renderer = this.createRenderer(this.canvas);
+    this.pendingInitialSource = this.params.source ?? null;
+    const initialRenderer = this.selectedRendererKind();
+    this.renderer = this.createRenderer(this.canvas, initialRenderer);
+    this.rendererSelection = `${this.params.renderer}:${initialRenderer}`;
     this.reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-    this.canvas.setAttribute('role', 'img');
-    if (this.params.decorative) this.canvas.setAttribute('aria-hidden', 'true');
-    if (this.params.fallback && !(element instanceof HTMLCanvasElement)) {
-      element.style.backgroundImage = `url("${this.params.fallback}")`;
-      element.style.backgroundSize = 'cover';
-    }
+    this.reducedMotion.addEventListener('change', this.onReducedMotionChange);
+    this.updateAccessibility();
+    this.updateFallback();
 
     this.resizeObserver = new ResizeObserver(() => {
       this.resize();
@@ -100,13 +124,10 @@ export class AgencyDitherFX {
     this.resizeObserver.observe(element);
     this.visibilityObserver = new IntersectionObserver(
       entries => {
+        this.intersectionKnown = true;
         this.visible = entries[0]?.isIntersecting ?? false;
         if (this.visible) {
-          this.source.play();
-          this.secondarySource.play();
-          this.maskSource.play();
-          if (this.shouldLoop()) this.start();
-          else this.requestRender();
+          this.activate();
         } else {
           scheduler.remove(this);
           this.source.pause();
@@ -120,20 +141,23 @@ export class AgencyDitherFX {
     this.canvas.addEventListener('pointermove', this.onPointerMove, { passive: true });
     this.canvas.addEventListener('pointerleave', this.onPointerLeave, { passive: true });
     this.canvas.addEventListener('pointerdown', this.onClick, { passive: true });
+    this.canvas.addEventListener('agencydither:webglrestored', this.onWebGLRestored);
+    document.addEventListener('visibilitychange', this.onDocumentVisibilityChange);
     this.resize();
 
-    if (this.params.source) void this.setSource(this.params.source);
     if (this.params.immediate) {
       this.visible = true;
-      this.start();
+      this.activate();
     }
   }
 
   async setSource(input: SourceInput, kind?: 'image' | 'video'): Promise<this> {
     this.assertAlive();
-    await this.source.set(input, kind);
+    this.pendingInitialSource = null;
+    const frame = await this.source.set(input, kind);
+    if (!frame || this.destroyed) return this;
     this.dirty = true;
-    if (this.visible || this.params.immediate) {
+    if (this.isActive()) {
       await this.source.play();
       if (this.shouldLoop()) this.start();
       else this.render();
@@ -146,8 +170,11 @@ export class AgencyDitherFX {
     kind?: 'image' | 'video'
   ): Promise<this> {
     this.assertAlive();
-    await this.secondarySource.set(input, kind);
-    if (this.visible || this.params.immediate) await this.secondarySource.play();
+    const frame = await this.secondarySource.set(input, kind);
+    if (!frame || this.destroyed) return this;
+    if (this.isActive()) await this.secondarySource.play();
+    this.ensureRenderer();
+    this.resize();
     this.requestRender();
     return this;
   }
@@ -157,20 +184,27 @@ export class AgencyDitherFX {
     kind?: 'image' | 'video'
   ): Promise<this> {
     this.assertAlive();
-    await this.maskSource.set(input, kind);
-    if (this.visible || this.params.immediate) await this.maskSource.play();
+    const frame = await this.maskSource.set(input, kind);
+    if (!frame || this.destroyed) return this;
+    if (this.isActive()) await this.maskSource.play();
+    this.ensureRenderer();
+    this.resize();
     this.requestRender();
     return this;
   }
 
   clearSecondarySource(): this {
     this.secondarySource.release();
+    this.ensureRenderer();
+    this.resize();
     this.requestRender();
     return this;
   }
 
   clearMaskSource(): this {
     this.maskSource.release();
+    this.ensureRenderer();
+    this.resize();
     this.requestRender();
     return this;
   }
@@ -179,6 +213,8 @@ export class AgencyDitherFX {
     this.assertAlive();
     const merged = this.mergeOptions(this.params, options);
     Object.assign(this.params, merged);
+    this.updateAccessibility();
+    this.updateFallback();
     this.ensureRenderer();
     this.resize();
     this.requestRender();
@@ -194,10 +230,13 @@ export class AgencyDitherFX {
     const next = this.mergeOptions(DEFAULT_OPTIONS, preset);
     next.immediate = this.params.immediate;
     next.decorative = this.params.decorative;
+    next.ariaLabel = this.params.ariaLabel;
     next.fallback = this.params.fallback;
     next.worker = this.params.worker;
     if (this.params.source) next.source = this.params.source;
     Object.assign(this.params, next);
+    this.updateAccessibility();
+    this.updateFallback();
     this.ensureRenderer();
     this.resize();
     this.requestRender();
@@ -205,6 +244,7 @@ export class AgencyDitherFX {
   }
 
   async registerSymbol(name: string, svg: string | SVGElement): Promise<this> {
+    this.assertAlive();
     const markup =
       typeof svg === 'string' ? svg : new XMLSerializer().serializeToString(svg);
     const blob = new Blob([markup], { type: 'image/svg+xml' });
@@ -214,6 +254,8 @@ export class AgencyDitherFX {
       image.decoding = 'async';
       image.src = url;
       await image.decode();
+      if (this.destroyed) return this;
+      this.symbols.set(name, image);
       this.renderer.setSymbol(name, image);
     } catch {
       throw new Error(`AgencyDitherFX could not decode SVG symbol "${name}".`);
@@ -234,6 +276,7 @@ export class AgencyDitherFX {
   }
 
   unregisterSymbol(name: string): this {
+    this.symbols.delete(name);
     this.renderer.removeSymbol(name);
     this.requestRender();
     return this;
@@ -241,6 +284,9 @@ export class AgencyDitherFX {
 
   render(time = performance.now()): this {
     if (this.destroyed || !this.source.current?.ready) return this;
+    const previousRenderer = this.renderer;
+    this.ensureRenderer();
+    if (previousRenderer !== this.renderer) this.resize();
     this.stats = this.renderer.render(
       this.source.current,
       this.params,
@@ -260,7 +306,7 @@ export class AgencyDitherFX {
   start(): this {
     if (this.destroyed) return this;
     this.running = true;
-    if (this.visible || this.params.immediate) scheduler.add(this);
+    if (this.isActive()) scheduler.add(this);
     return this;
   }
 
@@ -271,7 +317,7 @@ export class AgencyDitherFX {
   }
 
   tick(time: number): boolean {
-    if (!this.running || this.destroyed || (!this.visible && !this.params.immediate)) return false;
+    if (!this.running || this.destroyed || !this.isActive()) return false;
     const fps = isErrorDiffusion(this.params.algorithm)
       ? Math.min(12, this.params.maxFps)
       : Math.min(this.params.animation.fps, this.params.maxFps);
@@ -280,8 +326,9 @@ export class AgencyDitherFX {
     if (this.pointer.rippleStarted > 0 && time - this.pointer.rippleStarted > 2200) {
       this.pointer.rippleStarted = 0;
     }
-    if (this.dirty || this.shouldLoop()) this.render(time);
-    if (!this.shouldLoop() && this.oneShot) {
+    const shouldLoop = this.shouldLoop();
+    if (this.dirty || shouldLoop) this.render(time);
+    if (!shouldLoop && this.oneShot) {
       this.oneShot = false;
       this.running = false;
       return false;
@@ -348,6 +395,12 @@ export class AgencyDitherFX {
     return () => this.element.removeEventListener('agencydither:render', wrapped);
   }
 
+  onError(listener: ErrorListener): () => void {
+    const wrapped = listener as EventListener;
+    this.element.addEventListener('agencydither:error', wrapped);
+    return () => this.element.removeEventListener('agencydither:error', wrapped);
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -355,17 +408,22 @@ export class AgencyDitherFX {
     this.source.release();
     this.secondarySource.release();
     this.maskSource.release();
+    this.renderer.destroy();
+    this.symbols.clear();
     this.resizeObserver.disconnect();
     this.visibilityObserver.disconnect();
+    this.reducedMotion.removeEventListener('change', this.onReducedMotionChange);
+    document.removeEventListener('visibilitychange', this.onDocumentVisibilityChange);
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerleave', this.onPointerLeave);
     this.canvas.removeEventListener('pointerdown', this.onClick);
+    this.canvas.removeEventListener('agencydither:webglrestored', this.onWebGLRestored);
     if (!(this.element instanceof HTMLCanvasElement)) this.canvas.remove();
   }
 
   private requestRender(): void {
     this.dirty = true;
-    if (this.visible || this.params.immediate) {
+    if (this.isActive()) {
       this.oneShot = !this.shouldLoop();
       this.start();
     }
@@ -386,6 +444,27 @@ export class AgencyDitherFX {
     );
   }
 
+  private activate(): void {
+    if (!this.isActive()) return;
+    const pendingSource = this.pendingInitialSource;
+    if (pendingSource) {
+      this.pendingInitialSource = null;
+      void this.setSource(pendingSource).catch(error => this.reportError(error));
+      return;
+    }
+    void this.source.play();
+    void this.secondarySource.play();
+    void this.maskSource.play();
+    if (this.shouldLoop()) this.start();
+    else this.requestRender();
+  }
+
+  private isActive(): boolean {
+    return !document.hidden && (
+      this.visible || (this.params.immediate && !this.intersectionKnown)
+    );
+  }
+
   private resize(): void {
     const rect = this.element.getBoundingClientRect();
     this.renderer.resize(rect.width || 1, rect.height || 1, this.params);
@@ -403,9 +482,15 @@ export class AgencyDitherFX {
   }
 
   private ensureRenderer(): void {
-    if (this.params.renderer === this.renderer.kind) return;
+    const selected = this.selectedRendererKind();
+    const selection = `${this.params.renderer}:${selected}`;
+    if (selection === this.rendererSelection) return;
+    this.rendererSelection = selection;
+    if (selected === this.renderer.kind) return;
     if (this.element instanceof HTMLCanvasElement) {
-      this.renderer = this.createRenderer(this.canvas, this.params.renderer);
+      this.renderer.destroy();
+      this.renderer = this.createRenderer(this.canvas, selected);
+      this.restoreSymbols();
       return;
     }
 
@@ -419,12 +504,58 @@ export class AgencyDitherFX {
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerleave', this.onPointerLeave);
     this.canvas.removeEventListener('pointerdown', this.onClick);
+    this.canvas.removeEventListener('agencydither:webglrestored', this.onWebGLRestored);
+    this.renderer.destroy();
     this.canvas.replaceWith(nextCanvas);
     this.canvas = nextCanvas;
     this.canvas.addEventListener('pointermove', this.onPointerMove, { passive: true });
     this.canvas.addEventListener('pointerleave', this.onPointerLeave, { passive: true });
     this.canvas.addEventListener('pointerdown', this.onClick, { passive: true });
-    this.renderer = this.createRenderer(this.canvas, this.params.renderer);
+    this.canvas.addEventListener('agencydither:webglrestored', this.onWebGLRestored);
+    this.renderer = this.createRenderer(this.canvas, selected);
+    this.restoreSymbols();
+    this.updateAccessibility();
+  }
+
+  private selectedRendererKind(): RendererKind {
+    if (this.params.renderer !== 'webgl') return 'canvas';
+    return WebGLRenderer.fallbackReason(
+      this.params,
+      this.secondarySource.current,
+      this.maskSource.current
+    )
+      ? 'canvas'
+      : 'webgl';
+  }
+
+  private restoreSymbols(): void {
+    for (const [name, image] of this.symbols) this.renderer.setSymbol(name, image);
+  }
+
+  private updateAccessibility(): void {
+    if (this.params.decorative) {
+      this.canvas.setAttribute('aria-hidden', 'true');
+      this.canvas.removeAttribute('role');
+      this.canvas.removeAttribute('aria-label');
+      return;
+    }
+    this.canvas.removeAttribute('aria-hidden');
+    this.canvas.setAttribute('role', 'img');
+    if (this.params.ariaLabel) this.canvas.setAttribute('aria-label', this.params.ariaLabel);
+    else this.canvas.removeAttribute('aria-label');
+  }
+
+  private updateFallback(): void {
+    if (this.element instanceof HTMLCanvasElement) return;
+    this.element.style.backgroundImage = this.params.fallback
+      ? `url("${this.params.fallback}")`
+      : '';
+    if (this.params.fallback) this.element.style.backgroundSize = 'cover';
+  }
+
+  private reportError(error: unknown): void {
+    const detail = error instanceof Error ? error : new Error(String(error));
+    this.element.dispatchEvent(new CustomEvent<Error>('agencydither:error', { detail }));
   }
 
   private trackFps(time: number): void {
@@ -436,7 +567,15 @@ export class AgencyDitherFX {
     if (isErrorDiffusion(this.params.algorithm) && this.source.current?.dynamic) {
       this.stats.warning = 'Error diffusion is throttled for animated sources';
     } else if (this.params.renderer !== this.stats.renderer) {
-      this.stats.warning = `${this.params.renderer} requested; ${this.stats.renderer} fallback is active`;
+      const reason = this.params.renderer === 'webgl'
+        ? WebGLRenderer.fallbackReason(
+            this.params,
+            this.secondarySource.current,
+            this.maskSource.current
+          )
+        : '';
+      this.stats.warning = reason ||
+        `${this.params.renderer} requested; ${this.stats.renderer} fallback is active`;
     }
   }
 

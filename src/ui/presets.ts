@@ -110,6 +110,22 @@ export const presets: Record<string, Preset> = {
     background: '#111827',
     foreground: '#f9d96f'
   },
+  'left-scan-reveal': {
+    name: 'Left Scan Reveal',
+    mode: 'blocks',
+    algorithm: 'bayer4',
+    cellSize: 9,
+    foreground: '#f0ede5',
+    background: '#11110f',
+    colorMode: 'source',
+    contrast: 1.2,
+    ditherAmount: 0.7,
+    revealProgress: 1,
+    stagger: true,
+    staggerFrom: 'left',
+    staggerAmount: 0.82,
+    animationDuration: 1.1
+  },
   'kinetic-type-mask': {
     name: 'Kinetic Type Mask',
     mode: 'ascii',

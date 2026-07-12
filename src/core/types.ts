@@ -25,7 +25,20 @@ export type ColorMode = 'monochrome' | 'source' | 'palette' | 'brightness';
 export type SourceFit = 'cover' | 'contain' | 'fill' | 'none' | 'stretch';
 export type Primitive = 'dot' | 'block' | 'glyph' | 'symbol' | 'line' | 'none';
 export type RendererKind = 'canvas' | 'webgl' | 'svg';
-export type StaggerFrom = 'start' | 'center' | 'end' | 'edges' | 'random';
+export type StaggerFrom =
+  | 'start'
+  | 'center'
+  | 'end'
+  | 'edges'
+  | 'left'
+  | 'right'
+  | 'top'
+  | 'bottom'
+  | 'top-left'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-right'
+  | 'random';
 export type AmbientMode = 'drift' | 'wave' | 'orbit' | 'pulse' | 'jitter';
 
 export interface ToneBand {
@@ -123,6 +136,7 @@ export interface AgencyDitherOptions {
   interaction: InteractionOptions;
   immediate: boolean;
   decorative: boolean;
+  ariaLabel?: string;
   fallback?: string;
   worker: boolean;
 }
@@ -151,6 +165,9 @@ export interface RenderStats {
   height: number;
   renderer: RendererKind;
   warning: string;
+  sampleMs?: number;
+  ditherMs?: number;
+  drawMs?: number;
 }
 
 export interface GsapLike {

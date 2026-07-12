@@ -19,6 +19,9 @@ AgencyDitherFX.useGSAP(gsap);
 const preview = $<HTMLElement>('[data-preview]');
 const status = $<HTMLElement>('[data-status]');
 const metrics = $<HTMLElement>('[data-metrics]');
+const rendererState = $<HTMLElement>('[data-renderer-state]');
+const rendererActive = $<HTMLElement>('[data-renderer-active]');
+const rendererNote = $<HTMLElement>('[data-renderer-note]');
 const upload = $<HTMLInputElement>('[data-upload]');
 const toneMapInput = $<HTMLTextAreaElement>('[data-tone-map]');
 const toneBandsElement = $<HTMLElement>('[data-tone-bands]');
@@ -82,6 +85,17 @@ const makeSource = (): string => {
   context.fillStyle = '#11110f';
   context.font = '900 280px sans-serif';
   context.fillText('FIELD', 80, 520);
+  context.font = '700 34px sans-serif';
+  context.fillText('TOP / LEFT', 78, 92);
+  context.beginPath();
+  context.moveTo(82, 118);
+  context.lineTo(82, 184);
+  context.lineTo(66, 162);
+  context.moveTo(82, 184);
+  context.lineTo(98, 162);
+  context.strokeStyle = '#11110f';
+  context.lineWidth = 7;
+  context.stroke();
   context.strokeStyle = '#eee9df';
   context.lineWidth = 36;
   context.strokeRect(760, 150, 430, 620);
@@ -336,6 +350,30 @@ $<HTMLButtonElement>('[data-apply-tone]').addEventListener('click', () => {
   }
 });
 
+$<HTMLButtonElement>('[data-webgl-safe]').addEventListener('click', () => {
+  fx.clearSecondarySource();
+  fx.clearMaskSource();
+  fx.set({
+    renderer: 'webgl',
+    mode: 'dots',
+    algorithm: 'bayer8',
+    colorMode: 'source',
+    toneMap: [],
+    sourceMix: 0,
+    foregroundTransparent: false,
+    blur: 0,
+    rotation: 0,
+    displacement: 0,
+    rippleStrength: 0,
+    mouseInfluence: 0,
+    ambientEnabled: false
+  });
+  toneMapInput.value = '[]';
+  presetSelect.value = '';
+  syncControls();
+  status.textContent = 'WebGL-safe dots / source color';
+});
+
 $<HTMLButtonElement>('[data-reveal]').addEventListener('click', () => {
   fx.params.revealProgress = 0;
   fx.to(
@@ -366,8 +404,21 @@ $<HTMLButtonElement>('[data-export-png]').addEventListener('click', () => {
 
 fx.onRender(event => {
   const detail = event.detail;
-  metrics.textContent = `${detail.fps} FPS / ${detail.cells.toLocaleString()} cells / ${detail.width}x${detail.height}`;
-  if (detail.warning) status.textContent = detail.warning;
+  const requestedRenderer = fx.params.renderer;
+  const fellBack = requestedRenderer !== detail.renderer;
+  const timings = detail.sampleMs === undefined
+    ? ''
+    : ` / ${detail.sampleMs.toFixed(1)}ms sample / ${(detail.ditherMs ?? 0).toFixed(1)}ms dither / ${(detail.drawMs ?? 0).toFixed(1)}ms draw`;
+  metrics.textContent = `${detail.renderer.toUpperCase()} / ${detail.fps} FPS / ${detail.cells.toLocaleString()} cells / ${detail.width}x${detail.height}${timings}`;
+  rendererActive.textContent = fellBack
+    ? `${detail.renderer.toUpperCase()} active / ${requestedRenderer.toUpperCase()} requested`
+    : `${detail.renderer.toUpperCase()} active`;
+  rendererNote.textContent = detail.warning || (
+    detail.renderer === 'webgl'
+      ? 'GPU-compatible configuration active.'
+      : 'Full Canvas feature path active.'
+  );
+  rendererState.classList.toggle('renderer-state--fallback', fellBack);
 });
 
 window.addEventListener('pagehide', () => {
