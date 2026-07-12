@@ -50,6 +50,8 @@
     }
   },
   "devDependencies": {
+    "@emnapi/core": "^1.11.2",
+    "@emnapi/runtime": "^1.11.2",
     "gsap": "^3.15.0",
     "sass": "^1.89.2",
     "typescript": "^5.8.3",
