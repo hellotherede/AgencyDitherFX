@@ -594,9 +594,13 @@ export class CanvasRenderer implements DitherRenderer {
         }
 
         const color = band?.color ?? this.cellColor(index, value, options);
+        const toneScale =
+          options.mode === 'ascii' && options.glyphSelection === 'random'
+            ? 1
+            : 0.15 + value * 0.85;
         const scale =
           (band?.scale ?? 1) *
-          (0.15 + value * 0.85) *
+          toneScale *
           (0.35 + revealAmount * 0.65) *
           ambientScale;
         const alpha = revealAmount * maskValue;

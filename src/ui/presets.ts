@@ -81,7 +81,7 @@ export const presets: Record<string, Preset> = {
     cellSize: 14,
     responsiveMinCellSize: 10,
     responsiveMaxCellSize: 18,
-    background: '#050505',
+    background: '#000000',
     foreground: '#f7f7f3',
     colorMode: 'brightness',
     palette: ['#242419', '#f7f7f3'],

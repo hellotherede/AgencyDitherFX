@@ -343,8 +343,10 @@ fx.set({
 For a two-character ramp, `glyphProbability` is the probability of choosing
 the second glyph. With longer ramps, the seeded value selects evenly across
 the complete ramp. The same seed and grid dimensions always produce the same
-field. Random glyph selection currently uses the Canvas renderer; requesting
-WebGL falls back automatically and reports the reason through `warning`.
+field. Random glyph fields keep a uniform glyph size so source luminance can
+control color without thinning out the dark field. Random glyph selection
+currently uses the Canvas renderer; requesting WebGL falls back automatically
+and reports the reason through `warning`.
 
 Use the `old-ascii-renderer` preset for a dense field. Its ramp starts with a
 visible period instead of a blank, so even the lightest cells contain glyphs:
