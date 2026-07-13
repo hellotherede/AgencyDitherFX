@@ -743,9 +743,24 @@ export class CanvasRenderer implements DitherRenderer {
     }
     const scramble = options.glyphScramble > 0 &&
       ((index * 16807 + Math.floor(time / 70)) % 100) / 100 < options.glyphScramble;
-    const glyphIndex = scramble
-      ? (index + Math.floor(time / 80)) % ramp.length
-      : Math.round(value * (ramp.length - 1));
+    let glyphIndex = Math.round(value * (ramp.length - 1));
+
+    if (options.glyphSelection === 'random') {
+      const randomGlyph = hash(
+        index % this.columns,
+        Math.floor(index / this.columns),
+        Math.round(options.glyphSeed)
+      );
+
+      glyphIndex = ramp.length === 2
+        ? (randomGlyph < clamp(options.glyphProbability) ? 1 : 0)
+        : Math.min(ramp.length - 1, Math.floor(randomGlyph * ramp.length));
+    }
+
+    if (scramble) {
+      glyphIndex = (index + Math.floor(time / 80)) % ramp.length;
+    }
+
     this.context.fillText(band?.glyph ?? ramp[glyphIndex] ?? ' ', x, y);
   }
 

@@ -141,6 +141,14 @@
           <label><span>Symbol scale</span><output></output><input data-control="symbolScale" type="range" min="0" max="2" step="0.01"></label>
           <label><span>Rotation</span><output></output><input data-control="rotation" type="range" min="0" max="180" step="1"></label>
           <label><span>Glyph ramp</span><input data-control="glyphRamp" type="text"></label>
+          <label><span>Glyph selection</span>
+            <select data-control="glyphSelection">
+              <option value="tone">Source tone</option>
+              <option value="random">Seeded random</option>
+            </select>
+          </label>
+          <label><span>Glyph seed</span><output></output><input data-control="glyphSeed" type="range" min="0" max="1000" step="1"></label>
+          <label><span>Second glyph probability</span><output></output><input data-control="glyphProbability" type="range" min="0" max="1" step="0.01"></label>
           <label><span>Color mapping</span>
             <select data-control="colorMode">
               <option value="monochrome">Monochrome</option>

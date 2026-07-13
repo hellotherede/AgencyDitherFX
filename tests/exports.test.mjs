@@ -32,10 +32,15 @@ test('every published package entry exists after the library build', async () =>
 test('package import is SSR-safe and exposes expected defaults', () => {
   assert.equal(DEFAULT_OPTIONS.renderer, 'canvas');
   assert.equal(DEFAULT_OPTIONS.worker, false);
+  assert.equal(DEFAULT_OPTIONS.glyphSelection, 'tone');
+  assert.equal(DEFAULT_OPTIONS.glyphSeed, 1);
+  assert.equal(DEFAULT_OPTIONS.glyphProbability, 0.5);
   assert.equal(isErrorDiffusion('floyd-steinberg'), true);
   assert.equal(isErrorDiffusion('bayer8'), false);
   assert.ok(presets['editorial-bayer']);
   assert.equal(presets['left-scan-reveal'].staggerFrom, 'left');
+  assert.equal(presets['binary-signal-mask'].glyphSelection, 'random');
+  assert.equal(presets['binary-signal-mask'].glyphRamp, '01');
 });
 
 test('constructor gives a DOM-specific error outside the browser', () => {

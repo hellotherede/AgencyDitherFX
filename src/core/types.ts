@@ -22,6 +22,7 @@ export type DitherAlgorithm =
   | 'jarvis';
 
 export type ColorMode = 'monochrome' | 'source' | 'palette' | 'brightness';
+export type GlyphSelection = 'tone' | 'random';
 export type SourceFit = 'cover' | 'contain' | 'fill' | 'none' | 'stretch';
 export type Primitive = 'dot' | 'block' | 'glyph' | 'symbol' | 'line' | 'none';
 export type RendererKind = 'canvas' | 'webgl' | 'svg';
@@ -127,6 +128,9 @@ export interface AgencyDitherOptions {
   maskPositionY: number;
   maskScale: number;
   glyphRamp: string;
+  glyphSelection: GlyphSelection;
+  glyphSeed: number;
+  glyphProbability: number;
   fontFamily: string;
   fontWeight: string | number;
   colorMode: ColorMode;

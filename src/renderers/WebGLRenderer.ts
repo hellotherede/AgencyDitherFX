@@ -362,6 +362,9 @@ export class WebGLRenderer implements DitherRenderer {
     if (!SUPPORTED_MODES.has(options.mode)) {
       return `${options.mode} mode requires the Canvas renderer`;
     }
+    if (options.glyphSelection !== 'tone') {
+      return 'Random glyph selection requires the Canvas renderer';
+    }
     if (!(options.algorithm in ALGORITHMS)) {
       return `${options.algorithm} requires the Canvas renderer`;
     }

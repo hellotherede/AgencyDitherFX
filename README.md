@@ -21,7 +21,8 @@ Production-ready today:
 - Threshold, ordered Bayer, blue-noise-style, random, clustered halftone, and
   four error-diffusion algorithms
 - Monochrome, source-color, nearest-palette, and brightness-map color modes
-- Custom glyph ramps and dense-background ASCII
+- Custom glyph ramps, dense-background ASCII, and deterministic random glyph
+  fields
 - Built-in and uploaded SVG symbols
 - Seven-band luminance mapping with per-band symbol, color, and scale
 - Per-band drift, offset, rotation, and reveal timing parameters
@@ -316,11 +317,34 @@ fx.set({
 	mode: 'ascii',
 	cellSize: 8,
 	glyphRamp: ' .:-=+*#%@',
+	glyphSelection: 'tone',
 	fontFamily: '"DM Mono", monospace',
 	fontWeight: 500,
 	colorMode: 'source',
 });
 ```
+
+`glyphSelection: 'tone'` maps source luminance to the glyph ramp. Use
+`glyphSelection: 'random'` when luminance should control color while the glyph
+choice remains a stable seeded field:
+
+```ts
+fx.set({
+	mode: 'ascii',
+	glyphRamp: '01',
+	glyphSelection: 'random',
+	glyphSeed: 41,
+	glyphProbability: 0.5,
+	colorMode: 'brightness',
+	palette: ['#242419', '#f7f7f3'],
+});
+```
+
+For a two-character ramp, `glyphProbability` is the probability of choosing
+the second glyph. With longer ramps, the seeded value selects evenly across
+the complete ramp. The same seed and grid dimensions always produce the same
+field. Random glyph selection currently uses the Canvas renderer; requesting
+WebGL falls back automatically and reports the reason through `warning`.
 
 Use the `old-ascii-renderer` preset for a dense field. Its ramp starts with a
 visible period instead of a blank, so even the lightest cells contain glyphs:
@@ -358,6 +382,8 @@ Design-led presets include:
 - `newsprint-scream`: dense, high-contrast clustered halftone
 - `monument-grid`: large Bauhaus-like geometric tone bands
 - `old-ascii-renderer`: dense classic ASCII field
+- `binary-signal-mask`: seeded binary field with source-driven light and dark
+  glyph colors
 - `editorial-bayer`, `soft-blue-noise`, `halftone-print`, and the original
   utility presets
 

@@ -10,6 +10,7 @@ export type {
   AnimationOptions,
   ColorMode,
   DitherAlgorithm,
+  GlyphSelection,
   GsapLike,
   InteractionOptions,
   Primitive,
