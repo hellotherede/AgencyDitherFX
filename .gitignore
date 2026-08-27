@@ -22,3 +22,7 @@ Thumbs.db
 
 # Local agent metadata
 .agents/
+
+# Benchmark artifacts
+bench/lib-*.js
+bench/results-*.json

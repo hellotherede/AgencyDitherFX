@@ -741,6 +741,7 @@ unchanged.
 Built-in safeguards:
 
 - One shared scheduler across all sections
+- Pointer tracking without a per-event layout read
 - No per-cell DOM nodes
 - No repeated sample-canvas or typed-array allocation after resize
 - Cached raw-image buffers, glyph ramps, tone lookup tables, and palette RGB
@@ -757,7 +758,9 @@ Built-in safeguards:
 - SSR package-import and GSAP callback regression tests
 - ResizeObserver instead of frame-by-frame layout reads
 - Reduced-motion handling
-- Full listener, observer, media, and scheduler cleanup
+- Full listener, observer, media, scheduler, and GSAP tween cleanup
+- Static WebGL sources uploaded once instead of per frame
+- WebGL context budget so extra instances fall back instead of evicting
 
 Recommended starting budgets:
 
@@ -769,12 +772,54 @@ Recommended starting budgets:
 | Error-diffusion still |      8–14 |   1 | One-shot | Floyd/Atkinson   |
 
 Avoid full-screen, high-DPR video with `cellSize < 6` on Canvas. That is the
-point where the experimental WebGL renderer can help for `raw-dither`, dots,
-blocks, and halftone. ASCII and SVG-symbol workloads still need a future GPU
-glyph/symbol atlas before they get the same benefit. Requesting `webgl` with
-one of those features transparently falls back to Canvas and reports the
-reason through `warning`; returning to a compatible configuration restores
-WebGL automatically.
+point where the WebGL renderer can help for `raw-dither`, dots, blocks, and
+halftone. ASCII and SVG-symbol workloads still need a future GPU glyph/symbol
+atlas before they get the same benefit. Requesting `webgl` with one of those
+features transparently falls back to Canvas and reports the reason through
+`warning`; returning to a compatible configuration restores WebGL
+automatically.
+
+### Measured renderer cost
+
+`npm run bench` drives both renderers through a real Chrome and reports the
+cost of an identical configuration on each. Numbers below are a 1280×720 host
+at DPR 1, monochrome dots, Bayer 8, on a desktop AMD RX 6750 XT — treat the
+ratios as the signal, not the absolute values.
+
+| Cells   | Canvas frame | Canvas fps | WebGL frame | WebGL fps |
+| ------- | -----------: | ---------: | ----------: | --------: |
+| 6,420   |       7.7 ms |        107 |           — |         — |
+| 25,680  |      26.8 ms |         35 |      0.2 ms |  181 (\*) |
+| 102,480 |      95.5 ms |          6 |      0.3 ms |  181 (\*) |
+
+(\*) pinned to the harness `requestAnimationFrame` ceiling, so the real WebGL
+headroom is higher than the figure shows.
+
+Per-cell drawing, not sampling or dithering, is what costs. At 25,680 cells the
+whole sample-and-dither pipeline is roughly 1 ms (`raw-dither` mode, which skips
+primitive drawing, renders in 1.2 ms); the other ~25 ms is Canvas 2D rasterising
+one primitive per cell. Cell count is therefore the dominant lever on Canvas,
+and moving to `renderer: 'webgl'` removes the ceiling entirely for the modes it
+supports.
+
+Two things that look like optimisations are not, and were reverted after
+measuring — do not reintroduce them:
+
+- **Batching cells into one large path.** Accumulating 25k arcs or rects into a
+  single `beginPath()`/`fill()` was 2-4× *slower*. Skia already fast-paths small
+  `arc`/`fillRect` calls, and one path with 25k subpaths defeats them.
+- **A hand-rolled glyph atlas for ASCII.** Blitting pre-rendered glyph tiles was
+  ~3× slower than `fillText`, which already goes through Skia's own internal GPU
+  glyph atlas.
+
+### WebGL context budget
+
+Browsers drop the oldest live WebGL context once a page exceeds their limit
+(around 16 in Chrome), which would silently break earlier sections on a page
+built from many instances. `WebGLRenderer.maxContexts` (default `8`) caps how
+many instances take a GPU context; beyond it, new instances fall back to Canvas
+rather than evicting each other. Raise it only if you know the page's instance
+count stays well under the browser limit.
 
 Monitor `agencydither:render` or use `getStats()`:
 
@@ -798,6 +843,13 @@ fx.onRender((event) => {
 The optional timing fields separate source sampling, dithering/masking, and
 primitive drawing cost. Static sources should report near-zero sampling time
 after their first frame unless a sampling-related option changes.
+
+`drawMs` measures only the time spent *recording* Canvas 2D commands. Chrome
+rasterises them afterwards on its own thread, so on a dots or ASCII grid the
+real cost can be three to four times what `drawMs` reports — a frame that logs
+7 ms of drawing can still take 27 ms end to end. Use `fps`, or an external
+profile, to judge total draw cost; `drawMs` is only useful for comparing
+draw against sampling and dithering within the same frame.
 
 ## Accessibility
 

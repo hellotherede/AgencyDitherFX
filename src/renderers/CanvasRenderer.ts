@@ -9,6 +9,8 @@ import type {
 import { hexToRgb, luminance } from '../utils/color';
 import type { DitherRenderer, RendererPointerState } from './types';
 
+const TAU = Math.PI * 2;
+
 const clamp = (value: number, min = 0, max = 1): number =>
   Math.min(max, Math.max(min, value));
 
@@ -46,6 +48,8 @@ export class CanvasRenderer implements DitherRenderer {
   private samples = new Float32Array(0);
   private dithered = new Float32Array(0);
   private colors = new Uint8ClampedArray(0);
+  private blendedSamples = new Float32Array(0);
+  private blendedColors = new Uint8ClampedArray(0);
   private primarySamples = new Float32Array(0);
   private primaryColors = new Uint8ClampedArray(0);
   private secondarySamples = new Float32Array(0);
@@ -63,7 +67,12 @@ export class CanvasRenderer implements DitherRenderer {
   private toneLookup = new Array<ToneBand | undefined>(256);
   private paletteReference: string[] | null = null;
   private paletteRgb: Array<[string, number, number, number]> = [];
-  private sourceColorCache = new Map<number, string>();
+  // The source-colour cache is keyed by the same 12-bit quantisation the
+  // original used, so a flat array replaces a Map hash on every cell.
+  private sourceColorCache = new Array<string | undefined>(4096);
+  private paletteNearest = new Map<number, number>();
+  private styleColor = '';
+  private styleAlpha = -1;
   private columns = 0;
   private rows = 0;
   private cssWidth = 1;
@@ -134,7 +143,7 @@ export class CanvasRenderer implements DitherRenderer {
   destroy(): void {
     this.symbols.clear();
     this.tintedSymbols.clear();
-    this.sourceColorCache.clear();
+    this.sourceColorCache.fill(undefined);
     this.sampleCanvas.width = 0;
     this.secondaryCanvas.width = 0;
     this.maskCanvas.width = 0;
@@ -151,6 +160,10 @@ export class CanvasRenderer implements DitherRenderer {
   ): RenderStats {
     this.prepareGrid(options);
     const sampleStarted = performance.now();
+    // Per-cell RGB is only read back by the source and palette colour modes.
+    // Capturing it otherwise copied the full grid twice per frame for nothing.
+    const wantsColors =
+      options.colorMode === 'source' || options.colorMode === 'palette';
     this.sampleIntoCached(
       source,
       options,
@@ -158,11 +171,9 @@ export class CanvasRenderer implements DitherRenderer {
       this.sampleCanvas,
       this.sampleContext,
       this.primarySamples,
-      this.primaryColors,
+      wantsColors ? this.primaryColors : undefined,
       this.primaryCache
     );
-    this.samples.set(this.primarySamples);
-    this.colors.set(this.primaryColors);
     if (secondary?.ready && options.sourceMix > 0) {
       this.sampleIntoCached(
         secondary,
@@ -171,10 +182,23 @@ export class CanvasRenderer implements DitherRenderer {
         this.secondaryCanvas,
         this.secondaryContext,
         this.secondarySamples,
-        this.secondaryColors,
+        wantsColors ? this.secondaryColors : undefined,
         this.secondaryCache
       );
-      this.blendSources(options.sourceMix);
+      // Blending is the only path that needs a scratch copy; without it the
+      // primary buffers are read directly instead of being memcpy'd each frame.
+      this.blendedSamples.set(this.primarySamples);
+      this.samples = this.blendedSamples;
+      if (wantsColors) {
+        this.blendedColors.set(this.primaryColors);
+        this.colors = this.blendedColors;
+      } else {
+        this.colors = this.primaryColors;
+      }
+      this.blendSources(options.sourceMix, wantsColors);
+    } else {
+      this.samples = this.primarySamples;
+      this.colors = this.primaryColors;
     }
     if (mask?.ready) {
       this.maskActive = true;
@@ -259,11 +283,13 @@ export class CanvasRenderer implements DitherRenderer {
     this.columns = columns;
     this.rows = rows;
     const size = columns * rows;
-    this.samples = new Float32Array(size);
     this.dithered = new Float32Array(size);
-    this.colors = new Uint8ClampedArray(size * 4);
+    this.blendedSamples = new Float32Array(size);
+    this.blendedColors = new Uint8ClampedArray(size * 4);
     this.primarySamples = new Float32Array(size);
     this.primaryColors = new Uint8ClampedArray(size * 4);
+    this.samples = this.primarySamples;
+    this.colors = this.primaryColors;
     this.secondarySamples = new Float32Array(size);
     this.secondaryColors = new Uint8ClampedArray(size * 4);
     this.rawMaskSamples = new Float32Array(size);
@@ -295,7 +321,10 @@ export class CanvasRenderer implements DitherRenderer {
     cache: SampleCache,
     placement?: SamplePlacement
   ): void {
-    const signature = this.sampleSignature(options, time, canvas, placement);
+    // The colour buffer is only filled on demand, so a cached pass that skipped
+    // it must not satisfy a later frame that needs it.
+    const signature =
+      `${this.sampleSignature(options, time, canvas, placement)}|${colors ? 1 : 0}`;
     if (!source.dynamic && cache.source === source && cache.signature === signature) return;
     this.sampleInto(source, options, time, canvas, context, samples, colors, placement);
     cache.source = source;
@@ -390,43 +419,73 @@ export class CanvasRenderer implements DitherRenderer {
     context.drawImage(source.drawable, dx, dy, drawWidth, drawHeight);
     context.restore();
     const image = context.getImageData(0, 0, width, height);
-    colors?.set(image.data);
+    const data = image.data;
+    colors?.set(data);
 
-    for (let index = 0; index < samples.length; index += 1) {
-      const offset = index * 4;
-      let value = luminance(
-        image.data[offset] ?? 0,
-        image.data[offset + 1] ?? 0,
-        image.data[offset + 2] ?? 0
-      );
-      if (!isMask) {
-        value = Math.pow(
-          clamp((value - 0.5) * options.contrast + 0.5 + options.brightness),
-          options.gamma
-        );
-        value = options.invert ? 1 - value : value;
-        if (options.noiseAmount > 0) {
-          const x = index % width;
-          const y = Math.floor(index / width);
-          const frame = Math.floor(time * options.noiseSpeed * 0.02);
-          value += (hash(x, y, frame) - 0.5) * options.noiseAmount;
-        }
+    const count = samples.length;
+    if (isMask) {
+      for (let index = 0, offset = 0; index < count; index += 1, offset += 4) {
+        samples[index] = clamp(luminance(data[offset]!, data[offset + 1]!, data[offset + 2]!));
       }
-      samples[index] = clamp(value);
+      return;
+    }
+
+    // The arithmetic below is deliberately bit-identical to the original
+    // expression. A lookup table keyed on quantised luminance was measurably
+    // faster but shifted samples by up to 1/1024, which is enough to flip cells
+    // across the dither threshold and visibly change the output.
+    // Math.pow(x, 1) === x, so skipping it when gamma is 1 (the default) is the
+    // one part of the tone curve that can be optimised for free.
+    const { contrast, brightness, gamma, invert, noiseAmount } = options;
+    const linearGamma = gamma === 1;
+
+    if (noiseAmount <= 0) {
+      for (let index = 0, offset = 0; index < count; index += 1, offset += 4) {
+        const lum =
+          (data[offset]! * 0.2126 +
+            data[offset + 1]! * 0.7152 +
+            data[offset + 2]! * 0.0722) / 255;
+        const shaped = clamp((lum - 0.5) * contrast + 0.5 + brightness);
+        const toned = linearGamma ? shaped : Math.pow(shaped, gamma);
+        samples[index] = invert ? 1 - toned : toned;
+      }
+      return;
+    }
+
+    // `frame` used to be recomputed for every pixel of every frame, and the
+    // x/y reconstruction cost an integer divide per pixel.
+    const frame = Math.floor(time * options.noiseSpeed * 0.02);
+    let index = 0;
+    let offset = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1, index += 1, offset += 4) {
+        const lum =
+          (data[offset]! * 0.2126 +
+            data[offset + 1]! * 0.7152 +
+            data[offset + 2]! * 0.0722) / 255;
+        const shaped = clamp((lum - 0.5) * contrast + 0.5 + brightness);
+        const toned = linearGamma ? shaped : Math.pow(shaped, gamma);
+        const value =
+          (invert ? 1 - toned : toned) + (hash(x, y, frame) - 0.5) * noiseAmount;
+        samples[index] = clamp(value);
+      }
     }
   }
 
-  private blendSources(mix: number): void {
+  private blendSources(mix: number, withColors: boolean): void {
     const amount = clamp(mix);
-    for (let index = 0; index < this.samples.length; index += 1) {
-      this.samples[index] =
-        (this.samples[index] ?? 0) * (1 - amount) +
-        (this.secondarySamples[index] ?? 0) * amount;
+    const inverse = 1 - amount;
+    const samples = this.samples;
+    const secondary = this.secondarySamples;
+    for (let index = 0; index < samples.length; index += 1) {
+      samples[index] = samples[index]! * inverse + secondary[index]! * amount;
     }
-    for (let index = 0; index < this.colors.length; index += 1) {
-      this.colors[index] = Math.round(
-        (this.colors[index] ?? 0) * (1 - amount) +
-        (this.secondaryColors[index] ?? 0) * amount
+    if (!withColors) return;
+    const colors = this.colors;
+    const secondaryColors = this.secondaryColors;
+    for (let index = 0; index < colors.length; index += 1) {
+      colors[index] = Math.round(
+        colors[index]! * inverse + secondaryColors[index]! * amount
       );
     }
   }
@@ -481,6 +540,7 @@ export class CanvasRenderer implements DitherRenderer {
     time: number,
     pointer: RendererPointerState
   ): void {
+    const ctx = this.context;
     const cellWidth = this.cssWidth / this.columns;
     const cellHeight = this.cssHeight / this.rows;
     const reveal = clamp(options.revealProgress);
@@ -489,130 +549,145 @@ export class CanvasRenderer implements DitherRenderer {
       this.glyphRamp = Array.from(options.glyphRamp || ' ');
     }
     const ramp = this.glyphRamp;
-    this.context.textAlign = 'center';
-    this.context.textBaseline = 'middle';
-    this.context.font = `${options.fontWeight} ${Math.max(2, cellHeight * 0.98)}px ${options.fontFamily}`;
-    let currentColor = '';
-    let currentAlpha = 1;
+    const fontSize = Math.max(2, cellHeight * 0.98);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `${options.fontWeight} ${fontSize}px ${options.fontFamily}`;
+
+    // Every switch below is constant for the whole frame. Reading them once
+    // keeps the per-cell loop down to the work that actually varies.
+    const monochrome = options.colorMode === 'monochrome';
+    const bands = options.toneMap.length > 0;
+    const ambient = options.ambientEnabled && options.ambientAmount > 0;
+    const displaced = options.displacement > 0;
+    const pushes = pointer.active && options.mouseInfluence > 0;
+    const ripples = pointer.rippleStarted > 0 && options.rippleStrength > 0;
+    const skipTransparent = options.foregroundTransparent && monochrome;
+    const fixedPrimitive =
+      options.mode === 'hybrid'
+        ? null
+        : this.modePrimitive(options.mode, 0, options.primitiveMix);
+    const flatToneScale =
+      options.mode === 'ascii' && options.glyphSelection === 'random';
+    const staggered = options.stagger;
+    const staggerAmount = options.staggerAmount;
+    const staggerFrom = options.staggerFrom;
+    const foreground = options.foreground;
+    const ambientMode = options.ambientMode;
+    const ambientAmount = options.ambientAmount;
+    const ambientFrequency = Math.max(0.001, options.ambientFrequency);
+    const ambientElapsed = time * 0.001 * options.ambientSpeed;
+    const displacement = options.displacement;
+    const displacePhase = time * 0.0004;
+    const rippleAge = (time - pointer.rippleStarted) / 1000;
+    const rippleRadius = rippleAge * 240;
+    const rippleStrength = options.rippleStrength;
+    const mouseInfluence = options.mouseInfluence;
+
+    this.styleColor = '';
+    this.styleAlpha = -1;
 
     for (let y = 0; y < this.rows; y += 1) {
+      const rowStart = y * this.columns;
       for (let x = 0; x < this.columns; x += 1) {
-        const index = y * this.columns + x;
-        const sourceValue = clamp(this.samples[index] ?? 0);
-        const value = clamp(this.dithered[index] ?? 0);
-        const maskValue = this.maskActive
-          ? clamp(this.maskSamples[index] ?? 1)
-          : 1;
+        const index = rowStart + x;
+        const sourceValue = clamp(this.samples[index]!);
+        const value = clamp(this.dithered[index]!);
+        const maskValue = this.maskActive ? clamp(this.maskSamples[index]!) : 1;
         if (maskValue <= 0) continue;
-        const band = this.findToneBand(sourceValue);
+        const band = bands ? this.findToneBand(sourceValue) : undefined;
         const revealAmount = this.cellReveal(
           x,
           y,
           index,
-          clamp(reveal - (band?.revealOffset ?? 0)),
-          options.stagger,
-          options.staggerAmount,
-          options.staggerFrom
+          band ? clamp(reveal - (band.revealOffset ?? 0)) : reveal,
+          staggered,
+          staggerAmount,
+          staggerFrom
         );
         if (revealAmount <= 0) continue;
-        const primitive = band?.primitive ?? this.modePrimitive(options.mode, sourceValue, options.primitiveMix);
+        const primitive =
+          band?.primitive ??
+          fixedPrimitive ??
+          this.modePrimitive(options.mode, sourceValue, options.primitiveMix);
         if (primitive === 'none') continue;
-        if (
-          options.foregroundTransparent &&
-          options.colorMode === 'monochrome' &&
-          !band?.color
-        ) {
-          continue;
-        }
+        if (skipTransparent && !band?.color) continue;
 
         let px = (x + 0.5) * cellWidth;
         let py = (y + 0.5) * cellHeight;
         let ambientScale = 1;
-        px += (band?.offsetX ?? 0) * cellWidth;
-        py += (band?.offsetY ?? 0) * cellHeight;
-        if ((band?.motionAmount ?? 0) > 0) {
-          const phase =
-            time * 0.001 * (band?.motionSpeed ?? 1) +
-            x * 0.19 +
-            y * 0.11;
-          px += Math.cos(phase) * (band?.motionAmount ?? 0) * cellWidth;
-          py += Math.sin(phase * 0.83) * (band?.motionAmount ?? 0) * cellHeight;
+        if (band) {
+          px += (band.offsetX ?? 0) * cellWidth;
+          py += (band.offsetY ?? 0) * cellHeight;
+          const motionAmount = band.motionAmount ?? 0;
+          if (motionAmount > 0) {
+            const phase =
+              time * 0.001 * (band.motionSpeed ?? 1) + x * 0.19 + y * 0.11;
+            px += Math.cos(phase) * motionAmount * cellWidth;
+            py += Math.sin(phase * 0.83) * motionAmount * cellHeight;
+          }
         }
-        if (options.ambientEnabled && options.ambientAmount > 0) {
-          const elapsed = time * 0.001 * options.ambientSpeed;
-          const spatial =
-            (x + y * 0.73) * Math.max(0.001, options.ambientFrequency);
-          const amount = options.ambientAmount;
-          if (options.ambientMode === 'wave') {
-            py += Math.sin(elapsed * 2 + x * options.ambientFrequency) *
-              amount *
+        if (ambient) {
+          const spatial = (x + y * 0.73) * ambientFrequency;
+          if (ambientMode === 'wave') {
+            py += Math.sin(ambientElapsed * 2 + x * ambientFrequency) *
+              ambientAmount *
               cellHeight;
-          } else if (options.ambientMode === 'orbit') {
-            const angle = elapsed + spatial;
-            px += Math.cos(angle) * amount * cellWidth;
-            py += Math.sin(angle) * amount * cellHeight;
-          } else if (options.ambientMode === 'pulse') {
+          } else if (ambientMode === 'orbit') {
+            const angle = ambientElapsed + spatial;
+            px += Math.cos(angle) * ambientAmount * cellWidth;
+            py += Math.sin(angle) * ambientAmount * cellHeight;
+          } else if (ambientMode === 'pulse') {
             ambientScale =
-              1 + Math.sin(elapsed * 2 + spatial) * amount * 0.35;
-          } else if (options.ambientMode === 'jitter') {
-            const step = Math.floor(elapsed * 10);
+              1 + Math.sin(ambientElapsed * 2 + spatial) * ambientAmount * 0.35;
+          } else if (ambientMode === 'jitter') {
+            const step = Math.floor(ambientElapsed * 10);
             const hashX = Math.imul(index + step * 101, 2654435761);
             const hashY = Math.imul(index + step * 211, 1597334677);
             px += ((((hashX ^ (hashX >>> 16)) >>> 0) / 4294967295) - 0.5) *
-              amount *
+              ambientAmount *
               cellWidth;
             py += ((((hashY ^ (hashY >>> 16)) >>> 0) / 4294967295) - 0.5) *
-              amount *
+              ambientAmount *
               cellHeight;
           } else {
-            px += Math.cos(elapsed + spatial) * amount * cellWidth;
-            py += Math.sin(elapsed * 0.83 + spatial) * amount * cellHeight;
+            px += Math.cos(ambientElapsed + spatial) * ambientAmount * cellWidth;
+            py += Math.sin(ambientElapsed * 0.83 + spatial) *
+              ambientAmount *
+              cellHeight;
           }
         }
-        if (options.displacement > 0) {
-          const phase = sourceValue * Math.PI * 2 + time * 0.0004;
-          const amount = options.displacement;
-          px += Math.cos(phase + x * 0.17) * amount * cellWidth;
-          py += Math.sin(phase + y * 0.13) * amount * cellHeight;
+        if (displaced) {
+          const phase = sourceValue * Math.PI * 2 + displacePhase;
+          px += Math.cos(phase + x * 0.17) * displacement * cellWidth;
+          py += Math.sin(phase + y * 0.13) * displacement * cellHeight;
         }
-        if (pointer.active && options.mouseInfluence > 0) {
+        if (pushes) {
           const distance = Math.hypot(px - pointer.x, py - pointer.y);
           if (distance < 140) {
-            const force =
-              (1 - distance / 140) * options.mouseInfluence * cellWidth;
+            const force = (1 - distance / 140) * mouseInfluence * cellWidth;
             const angle = Math.atan2(py - pointer.y, px - pointer.x);
             px += Math.cos(angle) * force;
             py += Math.sin(angle) * force;
           }
         }
-        if (pointer.rippleStarted > 0 && options.rippleStrength > 0) {
-          const age = (time - pointer.rippleStarted) / 1000;
-          const radius = age * 240;
+        if (ripples) {
           const rippleDistance = Math.hypot(px - pointer.rippleX, py - pointer.rippleY);
-          const wave = Math.exp(-Math.abs(rippleDistance - radius) / 30) * Math.sin(rippleDistance * 0.12 - age * 16);
-          py += wave * options.rippleStrength * cellHeight;
+          const wave = Math.exp(-Math.abs(rippleDistance - rippleRadius) / 30) *
+            Math.sin(rippleDistance * 0.12 - rippleAge * 16);
+          py += wave * rippleStrength * cellHeight;
         }
 
-        const color = band?.color ?? this.cellColor(index, value, options);
-        const toneScale =
-          options.mode === 'ascii' && options.glyphSelection === 'random'
-            ? 1
-            : 0.15 + value * 0.85;
+        const color = band?.color ??
+          (monochrome ? foreground : this.cellColor(index, value, options));
+        const toneScale = flatToneScale ? 1 : 0.15 + value * 0.85;
         const scale =
           (band?.scale ?? 1) *
           toneScale *
           (0.35 + revealAmount * 0.65) *
           ambientScale;
         const alpha = revealAmount * maskValue;
-        if (alpha !== currentAlpha) {
-          this.context.globalAlpha = alpha;
-          currentAlpha = alpha;
-        }
-        if (color !== currentColor) {
-          this.context.fillStyle = color;
-          this.context.strokeStyle = color;
-          currentColor = color;
-        }
+
         this.drawPrimitive(
           primitive,
           px,
@@ -625,11 +700,13 @@ export class CanvasRenderer implements DitherRenderer {
           ramp,
           options,
           index,
-          time
+          time,
+          color,
+          alpha
         );
       }
     }
-    if (currentAlpha !== 1) this.context.globalAlpha = 1;
+    if (this.styleAlpha !== 1) ctx.globalAlpha = 1;
   }
 
   private cellReveal(
@@ -681,6 +758,13 @@ export class CanvasRenderer implements DitherRenderer {
     return 1 - (1 - local) ** 3;
   }
 
+  /**
+   * Draws one cell. Everything here deliberately stays on Skia's dedicated
+   * fast paths: fillRect for blocks, a single-arc path for dots, and fillText
+   * for glyphs. Accumulating cells into one large path, or blitting glyphs from
+   * a hand-rolled atlas, both measured substantially slower - Chrome already
+   * batches small fills and keeps its own GPU glyph atlas internally.
+   */
   private drawPrimitive(
     primitive: Primitive,
     x: number,
@@ -693,79 +777,124 @@ export class CanvasRenderer implements DitherRenderer {
     ramp: string[],
     options: AgencyDitherOptions,
     index: number,
-    time: number
+    time: number,
+    color: string,
+    alpha: number
   ): void {
+    const ctx = this.context;
+    this.applyStyle(color, alpha);
     const size = Math.min(width, height);
+
     if (primitive === 'dot') {
-      this.context.beginPath();
-      this.context.arc(x, y, size * 0.5 * scale * options.dotScale, 0, Math.PI * 2);
-      this.context.fill();
+      ctx.beginPath();
+      ctx.arc(x, y, size * 0.5 * scale * options.dotScale, 0, TAU);
+      ctx.fill();
       return;
     }
+
     if (primitive === 'block') {
       const rotation = options.rotation + (band?.rotation ?? 0);
+      const scaledWidth = width * scale;
+      const scaledHeight = height * scale;
       if (rotation === 0) {
-        this.context.fillRect(
-          x - width * scale * 0.5,
-          y - height * scale * 0.5,
-          width * scale,
-          height * scale
+        ctx.fillRect(
+          x - scaledWidth * 0.5,
+          y - scaledHeight * 0.5,
+          scaledWidth,
+          scaledHeight
         );
         return;
       }
-      this.context.save();
-      this.context.translate(x, y);
-      this.context.rotate(rotation * Math.PI / 180);
-      this.context.fillRect(-width * scale * 0.5, -height * scale * 0.5, width * scale, height * scale);
-      this.context.restore();
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rotation * Math.PI / 180);
+      ctx.fillRect(
+        -scaledWidth * 0.5,
+        -scaledHeight * 0.5,
+        scaledWidth,
+        scaledHeight
+      );
+      ctx.restore();
       return;
     }
+
     if (primitive === 'line') {
-      this.context.lineWidth = Math.max(1, size * 0.12 * scale);
-      this.context.beginPath();
-      this.context.moveTo(x - width * 0.4, y + height * 0.4);
-      this.context.lineTo(x + width * 0.4, y - height * 0.4);
-      this.context.stroke();
+      ctx.lineWidth = Math.max(1, size * 0.12 * scale);
+      ctx.beginPath();
+      ctx.moveTo(x - width * 0.4, y + height * 0.4);
+      ctx.lineTo(x + width * 0.4, y - height * 0.4);
+      ctx.stroke();
       return;
     }
+
     if (primitive === 'symbol') {
       const symbolName = band?.symbol ?? this.firstSymbol;
       const symbol = band?.color
         ? this.getTintedSymbol(symbolName, band.color)
         : this.symbols.get(symbolName);
-      if (symbol) {
-        const symbolScale = scale * options.symbolScale;
-        this.context.drawImage(
-          symbol,
-          x - width * symbolScale * 0.5,
-          y - height * symbolScale * 0.5,
-          width * symbolScale,
-          height * symbolScale
-        );
-      }
+      if (!symbol) return;
+      const symbolScale = scale * options.symbolScale;
+      ctx.drawImage(
+        symbol,
+        x - width * symbolScale * 0.5,
+        y - height * symbolScale * 0.5,
+        width * symbolScale,
+        height * symbolScale
+      );
       return;
     }
-    const scramble = options.glyphScramble > 0 &&
-      ((index * 16807 + Math.floor(time / 70)) % 100) / 100 < options.glyphScramble;
-    let glyphIndex = Math.round(value * (ramp.length - 1));
 
+    const override = band?.glyph;
+    if (override !== undefined) {
+      ctx.fillText(override, x, y);
+      return;
+    }
+    const glyphIndex = this.glyphIndexFor(value, ramp, options, index, time);
+    ctx.fillText(ramp[glyphIndex] ?? ' ', x, y);
+  }
+
+  private glyphIndexFor(
+    value: number,
+    ramp: string[],
+    options: AgencyDitherOptions,
+    index: number,
+    time: number
+  ): number {
+    let glyphIndex = Math.round(value * (ramp.length - 1));
     if (options.glyphSelection === 'random') {
       const randomGlyph = hash(
         index % this.columns,
-        Math.floor(index / this.columns),
+        (index / this.columns) | 0,
         Math.round(options.glyphSeed)
       );
-
       glyphIndex = ramp.length === 2
         ? (randomGlyph < clamp(options.glyphProbability) ? 1 : 0)
         : Math.min(ramp.length - 1, Math.floor(randomGlyph * ramp.length));
     }
-
-    if (scramble) {
+    if (
+      options.glyphScramble > 0 &&
+      ((index * 16807 + Math.floor(time / 70)) % 100) / 100 < options.glyphScramble
+    ) {
       glyphIndex = (index + Math.floor(time / 80)) % ramp.length;
     }
+    return glyphIndex;
+  }
 
-    this.context.fillText(band?.glyph ?? ramp[glyphIndex] ?? ' ', x, y);
+  /**
+   * Applies fill/stroke state only when it actually changes. `styleColor` and
+   * `styleAlpha` mirror what is currently set on the context.
+   */
+  private applyStyle(color: string, alpha: number): void {
+    const ctx = this.context;
+    if (this.styleAlpha !== alpha) {
+      ctx.globalAlpha = alpha;
+      this.styleAlpha = alpha;
+    }
+    if (this.styleColor !== color) {
+      ctx.fillStyle = color;
+      ctx.strokeStyle = color;
+      this.styleColor = color;
+    }
   }
 
   private prepareToneLookup(toneMap: ToneBand[]): void {
@@ -824,14 +953,14 @@ export class CanvasRenderer implements DitherRenderer {
   private cellColor(index: number, value: number, options: AgencyDitherOptions): string {
     if (options.colorMode === 'source') {
       const offset = index * 4;
-      const r = (this.colors[offset] ?? 0) >> 4;
-      const g = (this.colors[offset + 1] ?? 0) >> 4;
-      const b = (this.colors[offset + 2] ?? 0) >> 4;
+      const r = this.colors[offset]! >> 4;
+      const g = this.colors[offset + 1]! >> 4;
+      const b = this.colors[offset + 2]! >> 4;
       const key = (r << 8) | (g << 4) | b;
-      const cached = this.sourceColorCache.get(key);
-      if (cached) return cached;
+      const cached = this.sourceColorCache[key];
+      if (cached !== undefined) return cached;
       const color = `rgb(${r * 17} ${g * 17} ${b * 17})`;
-      this.sourceColorCache.set(key, color);
+      this.sourceColorCache[key] = color;
       return color;
     }
     if (options.colorMode === 'brightness') {
@@ -843,28 +972,39 @@ export class CanvasRenderer implements DitherRenderer {
     }
     if (options.colorMode === 'palette') {
       const offset = index * 4;
-      const r = this.colors[offset] ?? value * 255;
-      const g = this.colors[offset + 1] ?? value * 255;
-      const b = this.colors[offset + 2] ?? value * 255;
-      let nearest = options.foreground;
-      let nearestRgb: [number, number, number] | null = null;
-      let nearestDistance = Number.POSITIVE_INFINITY;
-      for (const [color, pr, pg, pb] of this.paletteRgb) {
-        const distance = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
-        if (distance < nearestDistance) {
-          nearest = color;
-          nearestRgb = [pr, pg, pb];
-          nearestDistance = distance;
+      const r = this.colors[offset]!;
+      const g = this.colors[offset + 1]!;
+      const b = this.colors[offset + 2]!;
+      // Memoised on the exact colour, not a quantised one: quantising here
+      // moved pixels across palette Voronoi boundaries and changed the output.
+      const key = (r << 16) | (g << 8) | b;
+      let slot = this.paletteNearest.get(key) ?? -1;
+      if (slot < 0) {
+        let nearestDistance = Number.POSITIVE_INFINITY;
+        slot = 0;
+        for (let entry = 0; entry < this.paletteRgb.length; entry += 1) {
+          const [, pr, pg, pb] = this.paletteRgb[entry]!;
+          const distance = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
+          if (distance < nearestDistance) {
+            nearestDistance = distance;
+            slot = entry;
+          }
         }
+        this.paletteNearest.set(key, slot);
+        // Bounded by the distinct colours a frame actually contains.
+        if (this.paletteNearest.size > 1 << 16) this.paletteNearest.clear();
       }
+      const nearest = this.paletteRgb[slot];
+      if (!nearest) return options.foreground;
       const mix = clamp(options.paletteMix);
-      if (mix < 1 && nearestRgb) {
-        const mixedR = Math.round(r * (1 - mix) + nearestRgb[0] * mix);
-        const mixedG = Math.round(g * (1 - mix) + nearestRgb[1] * mix);
-        const mixedB = Math.round(b * (1 - mix) + nearestRgb[2] * mix);
+      if (mix < 1) {
+        const inverse = 1 - mix;
+        const mixedR = Math.round(r * inverse + nearest[1] * mix);
+        const mixedG = Math.round(g * inverse + nearest[2] * mix);
+        const mixedB = Math.round(b * inverse + nearest[3] * mix);
         return `rgb(${mixedR} ${mixedG} ${mixedB})`;
       }
-      return nearest;
+      return nearest[0];
     }
     return options.foreground;
   }
@@ -876,5 +1016,6 @@ export class CanvasRenderer implements DitherRenderer {
       const [r, g, b] = hexToRgb(color);
       return [color, r, g, b];
     });
+    this.paletteNearest.clear();
   }
 }

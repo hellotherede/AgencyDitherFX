@@ -44,6 +44,9 @@ export class AgencyDitherFX {
   private oneShot = false;
   private lastRender = 0;
   private frameTimes: number[] = [];
+  // Tweens target this.params, so they keep the instance (and its render
+  // callback) alive after destroy() unless they are killed explicitly.
+  private readonly tweens = new Set<{ kill?: () => void }>();
   private stats: RenderStats = {
     fps: 0, cells: 0, width: 0, height: 0, renderer: 'canvas', warning: ''
   };
@@ -56,9 +59,11 @@ export class AgencyDitherFX {
     rippleStarted: 0
   };
   private readonly onPointerMove = (event: PointerEvent): void => {
-    const rect = this.canvas.getBoundingClientRect();
-    this.pointer.x = event.clientX - rect.left;
-    this.pointer.y = event.clientY - rect.top;
+    // offsetX/offsetY are already canvas-relative. Reading a bounding rect here
+    // forced a synchronous layout on every pointer event, which is exactly the
+    // wrong thing to do on a page that is also running scroll animations.
+    this.pointer.x = event.offsetX;
+    this.pointer.y = event.offsetY;
     this.pointer.active = true;
     if (this.params.interaction.pointer) this.requestRender();
   };
@@ -338,7 +343,7 @@ export class AgencyDitherFX {
 
   to(vars: Partial<AgencyDitherOptions>, gsapVars: Record<string, unknown> = {}): unknown {
     const gsap = getGsap();
-    return gsap.to(this.params, {
+    return this.track(gsap.to(this.params, {
       ...vars,
       ...gsapVars,
       onUpdate: () => {
@@ -346,7 +351,7 @@ export class AgencyDitherFX {
         const callback = gsapVars.onUpdate;
         if (typeof callback === 'function') callback();
       }
-    });
+    }));
   }
 
   fromTo(
@@ -354,7 +359,7 @@ export class AgencyDitherFX {
     toVars: Partial<AgencyDitherOptions>,
     gsapVars: Record<string, unknown> = {}
   ): unknown {
-    return getGsap().fromTo(this.params, fromVars, {
+    return this.track(getGsap().fromTo(this.params, fromVars, {
       ...toVars,
       ...gsapVars,
       onUpdate: () => {
@@ -362,11 +367,11 @@ export class AgencyDitherFX {
         const callback = gsapVars.onUpdate;
         if (typeof callback === 'function') callback();
       }
-    });
+    }));
   }
 
   timeline(vars: Record<string, unknown> = {}): unknown {
-    return getGsap().timeline(vars);
+    return this.track(getGsap().timeline(vars));
   }
 
   scrollTrigger(options: Record<string, unknown>): unknown {
@@ -419,6 +424,13 @@ export class AgencyDitherFX {
     this.canvas.removeEventListener('pointerdown', this.onClick);
     this.canvas.removeEventListener('agencydither:webglrestored', this.onWebGLRestored);
     if (!(this.element instanceof HTMLCanvasElement)) this.canvas.remove();
+  }
+
+  /** Retains any tween that exposes kill() so destroy() can release it. */
+  private track(tween: unknown): unknown {
+    const entry = tween as { kill?: () => void } | null;
+    if (entry && typeof entry.kill === 'function') this.tweens.add(entry);
+    return tween;
   }
 
   private requestRender(): void {

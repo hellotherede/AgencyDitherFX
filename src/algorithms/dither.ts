@@ -28,7 +28,7 @@ const MATRICES: Record<string, { size: number; values: number[] }> = {
   bayer16: { size: 16, values: makeBayer(16) }
 };
 
-const DIFFUSION: Partial<
+const DIFFUSION_SOURCE: Partial<
   Record<DitherAlgorithm, { divisor: number; taps: Array<[number, number, number]> }>
 > = {
   'floyd-steinberg': {
@@ -57,6 +57,32 @@ const DIFFUSION: Partial<
   }
 };
 
+// Flattened once at module load: the inner diffusion loop runs up to 12 taps
+// per pixel, so iterating tuples there allocated an iterator per pixel.
+interface Diffusion {
+  divisor: number;
+  count: number;
+  offsets: Int32Array;
+  // Raw integer weights. Pre-dividing by the divisor would change the
+  // floating-point association and perturb the diffused result.
+  weights: Int32Array;
+}
+
+const DIFFUSION: Partial<Record<DitherAlgorithm, Diffusion>> = {};
+for (const [name, spec] of Object.entries(DIFFUSION_SOURCE)) {
+  if (!spec) continue;
+  const count = spec.taps.length;
+  const offsets = new Int32Array(count * 2);
+  const weights = new Int32Array(count);
+  for (let index = 0; index < count; index += 1) {
+    const [dx, dy, weight] = spec.taps[index] as [number, number, number];
+    offsets[index * 2] = dx;
+    offsets[index * 2 + 1] = dy;
+    weights[index] = weight;
+  }
+  DIFFUSION[name as DitherAlgorithm] = { divisor: spec.divisor, count, offsets, weights };
+}
+
 const hash = (x: number, y: number, seed: number): number => {
   let value = Math.imul(x + seed * 1013, 374761393) ^ Math.imul(y + seed * 7919, 668265263);
   value = Math.imul(value ^ (value >>> 13), 1274126177);
@@ -76,20 +102,22 @@ export function ditherSamples(
   const diffusion = DIFFUSION[algorithm];
   if (diffusion) {
     output.set(input);
+    const { count, offsets, weights, divisor } = diffusion;
     for (let y = 0; y < height; y += 1) {
+      const rowStart = y * width;
       for (let x = 0; x < width; x += 1) {
-        const index = y * width + x;
-        const oldValue = output[index] ?? 0;
+        const index = rowStart + x;
+        const oldValue = output[index]!;
         const nextValue = oldValue >= threshold ? 1 : 0;
         const error = (oldValue - nextValue) * amount;
         output[index] = nextValue;
-        for (const [dx, dy, weight] of diffusion.taps) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-            const target = ny * width + nx;
-            output[target] = (output[target] ?? 0) + error * weight / diffusion.divisor;
-          }
+        for (let tap = 0; tap < count; tap += 1) {
+          const nx = x + offsets[tap * 2]!;
+          if (nx < 0 || nx >= width) continue;
+          const ny = y + offsets[tap * 2 + 1]!;
+          if (ny >= height) continue;
+          const target = ny * width + nx;
+          output[target] = output[target]! + error * weights[tap]! / divisor;
         }
       }
     }
@@ -97,15 +125,33 @@ export function ditherSamples(
   }
 
   const matrix = MATRICES[algorithm];
+  if (matrix) {
+    // Hoisted out of the inner loop: the matrix row only changes once per row,
+    // and the rank normaliser is constant for the whole pass.
+    const size = matrix.size;
+    const values = matrix.values;
+    const norm = 1 / (size * size);
+    for (let y = 0; y < height; y += 1) {
+      const rowStart = y * width;
+      const matrixRow = (y % size) * size;
+      for (let x = 0; x < width; x += 1) {
+        const index = rowStart + x;
+        const value = input[index]!;
+        const rank = values[matrixRow + (x % size)]!;
+        const localThreshold = threshold + (rank * norm - 0.5) * amount;
+        const binary = value >= localThreshold ? 1 : 0;
+        output[index] = value + (binary - value) * amount;
+      }
+    }
+    return;
+  }
+
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x;
       const value = input[index] ?? 0;
       let localThreshold = threshold;
-      if (matrix) {
-        const rank = matrix.values[(y % matrix.size) * matrix.size + (x % matrix.size)] ?? 0;
-        localThreshold += (rank / (matrix.size * matrix.size) - 0.5) * amount;
-      } else if (algorithm === 'blue-noise') {
+      if (algorithm === 'blue-noise') {
         const a = hash(x, y, 17);
         const b = hash(x + 7, y + 13, 41);
         localThreshold += ((a + b) * 0.5 - 0.5) * amount;

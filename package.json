@@ -39,7 +39,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "npm run build:lib && node --test tests/*.test.mjs",
-    "prepack": "npm test"
+    "prepack": "npm test",
+    "bench": "node bench/run.mjs"
   },
   "peerDependencies": {
     "gsap": ">=3.12.0"

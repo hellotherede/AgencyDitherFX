@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AgencyDitherFX benchmark</title>
+    <style>
+      html, body { margin: 0; background: #111; color: #eee; font: 12px monospace; }
+      #stage { width: 1280px; height: 720px; position: relative; }
+      #stage > div { position: absolute; inset: 0; }
+      #log { padding: 8px; white-space: pre; }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <div id="log"></div>
+    <script type="module">
+      const STAGE = document.getElementById('stage');
+
+      // ---- deterministic synthetic source -------------------------------
+      // A detailed image gives the dither/tone paths realistic entropy.
+      function makePattern(w, h) {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        const grad = ctx.createLinearGradient(0, 0, w, h);
+        grad.addColorStop(0, '#ffffff');
+        grad.addColorStop(0.5, '#7a5cff');
+        grad.addColorStop(1, '#0a0a0a');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+        let s = 12345;
+        const rnd = () => ((s = Math.imul(s, 1664525) + 1013904223 >>> 0) / 4294967296);
+        for (let i = 0; i < 240; i += 1) {
+          ctx.globalAlpha = 0.35;
+          ctx.fillStyle = `hsl(${Math.floor(rnd() * 360)} 80% ${20 + rnd() * 60}%)`;
+          ctx.beginPath();
+          ctx.arc(rnd() * w, rnd() * h, 8 + rnd() * 90, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        return c;
+      }
+
+      const PATTERN = makePattern(960, 540);
+      const STATIC_SOURCE = await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.src = PATTERN.toDataURL('image/png');
+      });
+      // A canvas source reports dynamic:true, so it re-samples every frame.
+      // This is the video-like worst case.
+      const DYNAMIC_SOURCE = PATTERN;
+
+      // ---- scenarios ----------------------------------------------------
+      const BASE = {
+        renderer: 'canvas',
+        responsive: false,
+        cellSize: 6,
+        maxCells: 200000,
+        maxDpr: 1,
+        resolutionScale: 1,
+        maxFps: 240,
+        immediate: true,
+        decorative: true,
+        algorithm: 'bayer8'
+      };
+
+      const SCENARIOS = [
+        { id: 'dots-mono-static',       dynamic: false, opts: { mode: 'dots' } },
+        { id: 'dots-mono-video',        dynamic: true,  opts: { mode: 'dots' } },
+        { id: 'blocks-mono-video',      dynamic: true,  opts: { mode: 'blocks' } },
+        { id: 'ascii-static',           dynamic: false, opts: { mode: 'ascii' } },
+        { id: 'ascii-video',            dynamic: true,  opts: { mode: 'ascii' } },
+        { id: 'dots-sourcecolor-video', dynamic: true,  opts: { mode: 'dots', colorMode: 'source' } },
+        { id: 'dots-palette-video',     dynamic: true,  opts: { mode: 'dots', colorMode: 'palette' } },
+        { id: 'raw-dither-video',       dynamic: true,  opts: { mode: 'raw-dither' } },
+        { id: 'dots-reveal-50',         dynamic: false, opts: { mode: 'dots', revealProgress: 0.5, stagger: true } },
+        { id: 'dots-ambient-video',     dynamic: true,  opts: { mode: 'dots', ambientEnabled: true, ambientAmount: 0.25 } },
+        { id: 'hybrid-video',           dynamic: true,  opts: { mode: 'hybrid' } },
+        { id: 'floyd-static',           dynamic: false, opts: { mode: 'dots', algorithm: 'floyd-steinberg' } },
+        { id: 'stucki-static',          dynamic: false, opts: { mode: 'dots', algorithm: 'stucki' } },
+        { id: 'dots-cell12-video',      dynamic: true,  opts: { mode: 'dots', cellSize: 12 } },
+        // Same visual configs, routed to the GPU renderer.
+        { id: 'gl-dots-mono-static',    dynamic: false, opts: { mode: 'dots', renderer: 'webgl' } },
+        { id: 'gl-dots-mono-video',     dynamic: true,  opts: { mode: 'dots', renderer: 'webgl' } },
+        { id: 'gl-blocks-mono-video',   dynamic: true,  opts: { mode: 'blocks', renderer: 'webgl' } },
+        { id: 'gl-raw-dither-video',    dynamic: true,  opts: { mode: 'raw-dither', renderer: 'webgl' } },
+        { id: 'gl-dots-sourcecol-video',dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', colorMode: 'source' } },
+        { id: 'gl-dots-cell3-video',    dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', cellSize: 3 } },
+        { id: 'dots-cell3-video',       dynamic: true,  opts: { mode: 'dots', cellSize: 3 } }
+      ];
+
+      const median = (a) => {
+        const s = [...a].sort((x, y) => x - y);
+        return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+      };
+      const pct = (a, p) => {
+        const s = [...a].sort((x, y) => x - y);
+        return s[Math.min(s.length - 1, Math.floor(s.length * p))];
+      };
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      async function makeHost() {
+        const host = document.createElement('div');
+        STAGE.append(host);
+        // Force layout so ResizeObserver/getBoundingClientRect see real size.
+        host.getBoundingClientRect();
+        await sleep(0);
+        return host;
+      }
+
+      // ---- one scenario, one library ------------------------------------
+      async function runScenario(Lib, scenario, frames) {
+        const host = await makeHost();
+        const fx = new Lib.AgencyDitherFX(host, { ...BASE, ...scenario.opts });
+        try {
+          await fx.setSource(scenario.dynamic ? DYNAMIC_SOURCE : STATIC_SOURCE);
+          fx.stop();
+
+          // warmup: JIT + first-frame allocations
+          let t = 1000;
+          for (let i = 0; i < 25; i += 1) { fx.render(t); t += 16.7; }
+
+          // Canvas2D only *records* draw ops during render(); rasterization is
+          // deferred to the raster thread. A 1x1 readback forces the flush, so
+          // `flushed` captures record + raster. Both libs pay the same fixed
+          // readback overhead, so the comparison stays fair.
+          let forceFlush = () => {};
+          const flushCtx = fx.canvas.getContext('2d');
+          if (flushCtx) {
+            forceFlush = () => { flushCtx.getImageData(0, 0, 1, 1); };
+          } else {
+            const gl = fx.canvas.getContext('webgl');
+            if (gl) {
+              const px = new Uint8Array(4);
+              forceFlush = () => { gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); };
+            }
+          }
+
+          // ---- metric 1: main-thread CPU cost per render -----------------
+          const times = [];
+          const flushed = [];
+          const sample = [], dith = [], draw = [];
+          for (let i = 0; i < frames; i += 1) {
+            const a = performance.now();
+            fx.render(t);
+            const b = performance.now();
+            forceFlush();
+            const c = performance.now();
+            times.push(b - a);
+            flushed.push(c - a);
+            const st = fx.getStats();
+            if (st.sampleMs !== undefined) { sample.push(st.sampleMs); dith.push(st.ditherMs); draw.push(st.drawMs); }
+            t += 16.7;
+          }
+
+          const stats = fx.getStats();
+
+          // ---- metric 2: live rAF throughput ----------------------------
+          // Uncapped-as-possible real loop; vsync still bounds this near 60.
+          let rafFrames = 0;
+          let liveError = null;
+          const liveStart = performance.now();
+          await new Promise((resolve) => {
+            // A throw inside rAF never rejects, so guard the loop and give it a
+            // hard wall-clock deadline; otherwise one bad frame hangs the run.
+            const bail = setTimeout(resolve, 8000);
+            const done = () => { clearTimeout(bail); resolve(); };
+            const step = (now) => {
+              try {
+                fx.render(now);
+              } catch (error) {
+                liveError = String(error && error.message ? error.message : error);
+                return done();
+              }
+              rafFrames += 1;
+              if (now - liveStart >= 2000) return done();
+              requestAnimationFrame(step);
+            };
+            requestAnimationFrame(step);
+          });
+          const liveMs = performance.now() - liveStart;
+
+          return {
+            id: scenario.id,
+            cells: stats.cells,
+            width: stats.width,
+            height: stats.height,
+            renderer: stats.renderer,
+            warning: stats.warning,
+            liveError,
+            medianMs: median(times),
+            p95Ms: pct(times, 0.95),
+            flushedMs: median(flushed),
+            meanMs: times.reduce((s, v) => s + v, 0) / times.length,
+            capableFps: 1000 / median(flushed),
+            liveFps: (rafFrames / liveMs) * 1000,
+            sampleMs: sample.length ? median(sample) : null,
+            ditherMs: dith.length ? median(dith) : null,
+            drawMs: draw.length ? median(draw) : null
+          };
+        } finally {
+          fx.destroy();
+          host.remove();
+        }
+      }
+
+      // ---- driver: interleaved A/B over repeated rounds -------------------
+      window.__bench = async ({ frames = 90, rounds = 3, only = null } = {}) => {
+        const [A, B] = await Promise.all([
+          import('./lib-baseline.js'),
+          import('./lib-optimized.js').catch(() => null)
+        ]);
+        const libs = B ? [['baseline', A], ['optimized', B]] : [['baseline', A]];
+        const list = only ? SCENARIOS.filter((s) => only.includes(s.id)) : SCENARIOS;
+        const acc = {};
+
+        for (let round = 0; round < rounds; round += 1) {
+          for (const scenario of list) {
+            // Alternate lib order per round to cancel out ordering bias.
+            const order = round % 2 === 0 ? libs : [...libs].reverse();
+            for (const [name, Lib] of order) {
+              const key = `${scenario.id}::${name}`;
+              const result = await runScenario(Lib, scenario, frames);
+              (acc[key] ??= []).push(result);
+              await sleep(60); // let the compositor settle between runs
+            }
+          }
+        }
+
+        // Take the best (lowest median) round per cell: least noise-contaminated.
+        const out = [];
+        for (const [key, runs] of Object.entries(acc)) {
+          const [id, lib] = key.split('::');
+          const best = runs.reduce((a, b) => (a.flushedMs <= b.flushedMs ? a : b));
+          out.push({ ...best, id, lib, rounds: runs.length });
+        }
+        return out;
+      };
+
+      // ---- pixel-parity check -------------------------------------------
+      // A faster renderer that changes what it draws is a bug, so every
+      // scenario is rendered by both builds and compared pixel for pixel.
+      async function renderOnce(Lib, scenario) {
+        const host = await makeHost();
+        const fx = new Lib.AgencyDitherFX(host, { ...BASE, ...scenario.opts });
+        try {
+          await fx.setSource(scenario.dynamic ? DYNAMIC_SOURCE : STATIC_SOURCE);
+          fx.stop();
+          for (let i = 0; i < 3; i += 1) fx.render(5000);
+          const w = fx.canvas.width, h = fx.canvas.height;
+          const ctx = fx.canvas.getContext('2d');
+          if (ctx) return { w, h, data: ctx.getImageData(0, 0, w, h).data };
+          const gl = fx.canvas.getContext('webgl');
+          if (!gl) return null;
+          const px = new Uint8Array(w * h * 4);
+          gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          return { w, h, data: px };
+        } finally {
+          fx.destroy();
+          host.remove();
+        }
+      }
+
+      window.__verify = async ({ only = null } = {}) => {
+        const [A, B] = await Promise.all([
+          import('./lib-baseline.js'),
+          import('./lib-optimized.js')
+        ]);
+        const list = only ? SCENARIOS.filter((s) => only.includes(s.id)) : SCENARIOS;
+        const out = [];
+        for (const scenario of list) {
+          try {
+            const a = await renderOnce(A, scenario);
+            const b = await renderOnce(B, scenario);
+            if (!a || !b) { out.push({ id: scenario.id, skipped: true }); continue; }
+            if (a.w !== b.w || a.h !== b.h) {
+              out.push({ id: scenario.id, error: 'size mismatch' });
+              continue;
+            }
+            let maxDiff = 0;
+            let sum = 0;
+            let differing = 0;
+            for (let i = 0; i < a.data.length; i += 1) {
+              const d = Math.abs(a.data[i] - b.data[i]);
+              if (d > 0) { differing += 1; sum += d; if (d > maxDiff) maxDiff = d; }
+            }
+            out.push({
+              id: scenario.id,
+              maxDiff,
+              meanDiff: sum / a.data.length,
+              pctChannels: (differing / a.data.length) * 100
+            });
+          } catch (error) {
+            out.push({ id: scenario.id, error: String(error && error.message || error) });
+          }
+        }
+        return out;
+      };
+
+      document.getElementById('log').textContent = 'ready';
+      window.__ready = true;
+    </script>
+  </body>
+</html>

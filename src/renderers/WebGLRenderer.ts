@@ -353,7 +353,20 @@ function rgba(color: string, alpha = 1): [number, number, number, number] {
 
 const colorCache = new Map<string, [number, number, number, number]>();
 
+// Browsers drop the oldest live WebGL context once a page exceeds their limit
+// (around 16 in Chrome), which would silently break earlier sections on a page
+// that uses many instances. Staying under a self-imposed budget means the
+// surplus instances fall back to Canvas instead of evicting each other.
+let liveContexts = 0;
+
 export class WebGLRenderer implements DitherRenderer {
+  /** Maximum simultaneous WebGL instances before new ones fall back to Canvas. */
+  static maxContexts = 8;
+
+  static get activeContexts(): number {
+    return liveContexts;
+  }
+
   static fallbackReason(
     options: AgencyDitherOptions,
     secondary?: SourceFrame | null,
@@ -400,6 +413,10 @@ export class WebGLRenderer implements DitherRenderer {
   private buffer!: WebGLBuffer;
   private uniforms!: WebGLUniforms;
   private contextLost = false;
+  private disposed = false;
+  private uploadedSource: SourceFrame | null = null;
+  private uploadedWidth = 0;
+  private uploadedHeight = 0;
   private cssWidth = 1;
   private cssHeight = 1;
   private dpr = 1;
@@ -421,6 +438,9 @@ export class WebGLRenderer implements DitherRenderer {
   };
 
   constructor(canvas: HTMLCanvasElement) {
+    if (liveContexts >= WebGLRenderer.maxContexts) {
+      throw new Error('AgencyDitherFX WebGL context budget reached.');
+    }
     this.canvas = canvas;
     const gl = canvas.getContext('webgl', {
       alpha: true,
@@ -429,6 +449,7 @@ export class WebGLRenderer implements DitherRenderer {
     });
     if (!gl) throw new Error('AgencyDitherFX requires WebGL support.');
     this.gl = gl;
+    liveContexts += 1;
     this.createResources();
     this.canvas.addEventListener('webglcontextlost', this.onContextLost);
     this.canvas.addEventListener('webglcontextrestored', this.onContextRestored);
@@ -436,6 +457,11 @@ export class WebGLRenderer implements DitherRenderer {
 
   private createResources(): void {
     const gl = this.gl;
+    // A restored context starts with a fresh texture, so the upload cache from
+    // the previous context must not be trusted.
+    this.uploadedSource = null;
+    this.uploadedWidth = 0;
+    this.uploadedHeight = 0;
     this.program = createProgram(gl);
     this.texture = gl.createTexture() ?? (() => {
       throw new Error('AgencyDitherFX could not create a WebGL texture.');
@@ -511,12 +537,19 @@ export class WebGLRenderer implements DitherRenderer {
   }
 
   destroy(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    liveContexts = Math.max(0, liveContexts - 1);
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost);
     this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored);
+    this.uploadedSource = null;
     if (!this.contextLost) {
       this.gl.deleteBuffer(this.buffer);
       this.gl.deleteTexture(this.texture);
       this.gl.deleteProgram(this.program);
+      // Frees the backing context immediately instead of waiting for GC, which
+      // matters when instances are created and torn down across route changes.
+      this.gl.getExtension('WEBGL_lose_context')?.loseContext();
     }
   }
 
@@ -538,14 +571,36 @@ export class WebGLRenderer implements DitherRenderer {
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGBA,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        source.drawable as TexImageSource
-      );
+      // A still image only has to reach the GPU once. Re-uploading it every
+      // frame was pure waste, and for video texSubImage2D reuses the existing
+      // storage instead of reallocating the texture each time.
+      const sameSize =
+        this.uploadedWidth === source.width && this.uploadedHeight === source.height;
+      if (source.dynamic || this.uploadedSource !== source || !sameSize) {
+        if (sameSize && this.uploadedSource) {
+          gl.texSubImage2D(
+            gl.TEXTURE_2D,
+            0,
+            0,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            source.drawable as TexImageSource
+          );
+        } else {
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            source.drawable as TexImageSource
+          );
+        }
+        this.uploadedSource = source;
+        this.uploadedWidth = source.width;
+        this.uploadedHeight = source.height;
+      }
     } catch {
       warning = 'WebGL could not upload the source; Canvas renderer is recommended';
       gl.clearColor(0, 0, 0, 0);
