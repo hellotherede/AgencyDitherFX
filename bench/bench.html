@@ -77,6 +77,12 @@
         img.src = makeMask(960, 540).toDataURL('image/png');
       });
 
+      // A registered SVG symbol, exercising both alpha and its own colours.
+      const SYMBOL_SVG =
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' +
+        '<polygon fill="#ef5a37" points="12,2 15,9 22,9 16.5,13.5 18.5,21 ' +
+        '12,16.5 5.5,21 7.5,13.5 2,9 9,9"/></svg>';
+
       const PATTERN = makePattern(960, 540);
       const STATIC_SOURCE = await new Promise((resolve) => {
         const img = new Image();
@@ -144,7 +150,9 @@
         // The real-world case: animated ASCII on a page that is also animating.
         { id: 'ascii-ambient',          dynamic: false, opts: { mode: 'ascii', renderer: 'webgl', ambientEnabled: true, ambientAmount: 0.25 } },
         { id: 'ascii-drift-video',      dynamic: true,  opts: { mode: 'ascii', renderer: 'webgl', ambientEnabled: true, ambientAmount: 0.25 } },
-        { id: 'ascii-scramble',         dynamic: false, opts: { mode: 'ascii', renderer: 'webgl', glyphScramble: 0.3 } }
+        { id: 'ascii-scramble',         dynamic: false, opts: { mode: 'ascii', renderer: 'webgl', glyphScramble: 0.3 } },
+        { id: 'gl-symbols-video',       dynamic: true, symbol: true, opts: { mode: 'symbols', renderer: 'webgl' } },
+        { id: 'symbols-video',          dynamic: true, symbol: true, opts: { mode: 'symbols' } }
       ];
 
       const median = (a) => {
@@ -174,6 +182,7 @@
           await fx.setSource(scenario.dynamic ? DYNAMIC_SOURCE : STATIC_SOURCE);
           if (scenario.mask) await fx.setMaskSource(MASK_SOURCE);
           if (scenario.secondary) await fx.setSecondarySource(SMOOTH_SOURCE);
+          if (scenario.symbol) await fx.registerSymbol('star', SYMBOL_SVG);
           fx.stop();
 
           // warmup: JIT + first-frame allocations
@@ -467,7 +476,9 @@
           { id: 'ascii-scramble-hi', opts: { mode: 'ascii', noiseAmount: 0, glyphScramble: 0.9 } },
           { id: 'glyph-random',   opts: { mode: 'ascii', noiseAmount: 0, glyphSelection: 'random', glyphSeed: 7 } },
           { id: 'glyph-binary',   opts: { mode: 'ascii', noiseAmount: 0, glyphSelection: 'random', glyphRamp: ' #', glyphProbability: 0.4 } },
-          { id: 'ambient-jitter', opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'jitter', ambientAmount: 0.3 } }
+          { id: 'ambient-jitter', opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'jitter', ambientAmount: 0.3 } },
+          { id: 'symbols',      symbol: true, opts: { mode: 'symbols', noiseAmount: 0 } },
+          { id: 'symbols-big',  symbol: true, opts: { mode: 'symbols', noiseAmount: 0, symbolScale: 1.6 } }
         ];
         const out = [];
         for (const cfg of CONFIGS) {
@@ -481,6 +492,7 @@
               await fx.setSource(cfg.smooth ? SMOOTH_SOURCE : STATIC_SOURCE);
             if (cfg.mask) await fx.setMaskSource(MASK_SOURCE);
             if (cfg.secondary) await fx.setSecondarySource(SMOOTH_SOURCE);
+            if (cfg.symbol) await fx.registerSymbol('star', SYMBOL_SVG);
               fx.stop();
               fx.render(4000);
               const w = fx.canvas.width, h = fx.canvas.height;
@@ -604,6 +616,41 @@
       };
 
       window.__diag = async () => {
+        {
+          const Lib = await import('./lib-optimized.js');
+          const host = await makeHost();
+          const fx = new Lib.AgencyDitherFX(host, { ...BASE, mode: 'symbols', renderer: 'webgl', immediate: true });
+          await fx.setSource(STATIC_SOURCE);
+          await fx.registerSymbol('star', SYMBOL_SVG);
+          fx.render(1000);
+          const st = fx.getStats();
+          const gl = fx.canvas.getContext('webgl');
+          let nonBg = 0;
+          if (gl) {
+            const px = new Uint8Array(fx.canvas.width * fx.canvas.height * 4);
+            gl.readPixels(0, 0, fx.canvas.width, fx.canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            for (let i = 0; i < px.length; i += 4) if (px[i] > 200 && px[i+1] < 150) nonBg++;
+            const w = fx.canvas.width, h = fx.canvas.height;
+            const at = (x, y) => { const i = ((h - 1 - y) * w + x) * 4; return [px[i], px[i+1], px[i+2], px[i+3]]; };
+            globalThis.__symbolPixels = [at(300, 300), at(303, 300), at(306, 303), at(640, 360)];
+          }
+          const probe = await new Promise((res) => {
+            const blob = new Blob([SYMBOL_SVG], { type: 'image/svg+xml' });
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.onload = () => res({ w: img.naturalWidth, h: img.naturalHeight, ok: true });
+            img.onerror = (e) => res({ ok: false, err: String(e) });
+            img.src = url;
+          });
+          globalThis.__symbolDiag = {
+            probe,
+            renderer: st.renderer,
+            warning: st.warning,
+            orangePixels: nonBg,
+            canvasPixels: fx.canvas.width * fx.canvas.height
+          };
+          fx.destroy(); host.remove();
+        }
         const Lib = await import('./lib-optimized.js');
         const out = [];
         for (const cfg of [

@@ -162,6 +162,8 @@ if (args.includes('--noise')) {
 }
 if (args.includes('--diag')) {
   const rows = await evaluate('window.__diag()');
+  console.log('symbolDiag', JSON.stringify(await evaluate('globalThis.__symbolDiag')));
+  console.log('symbolPixels', JSON.stringify(await evaluate('globalThis.__symbolPixels')));
   for (const row of rows) console.log(JSON.stringify(row));
   ws.close(); chrome.kill(); server.close();
   await rm(profile, { recursive: true, force: true }).catch(() => {});

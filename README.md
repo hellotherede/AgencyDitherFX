@@ -40,19 +40,18 @@ Production-ready today:
 Not implemented yet:
 
 - Full WebGL feature parity. The `webgl` renderer is the default and covers
-  every mode except `symbols`, all four colour modes, the realtime-safe
-  algorithms, luminance masks, secondary-source blending, and every motion
-  control except jitter. What still selects Canvas automatically, reporting the
-  reason through `warning`:
+  every mode, every colour mode, every realtime-safe algorithm, every motion
+  control, luminance masks, secondary-source blending, glyph scramble and
+  random glyph selection. What still selects Canvas automatically, reporting
+  the reason through `warning`:
 
-  | Feature                                | Why |
-  | -------------------------------------- | --- |
-  | Error diffusion                        | Each pixel depends on its predecessors; a fragment shader cannot express it |
-  | Symbols                                | Needs a symbol atlas, the same shape as the glyph atlas |
-  | Tone maps                              | Per-band primitive, colour, scale, offset and motion |
-  | Source blur                            | Needs a separate blur pass |
-  | Random glyphs, glyph scramble, jitter  | Need the integer hash GLSL ES 1.00 cannot express |
-  | Palettes over 16 colours               | The palette texture is 16 wide |
+  | Feature                  | Why |
+  | ------------------------ | --- |
+  | Error diffusion          | Each pixel depends on its predecessors, which a fragment shader cannot express |
+  | Tone maps                | Per-band primitive, colour, scale, offset and motion, including per-band symbols |
+  | Source blur              | Needs a separate blur pass |
+  | Palettes over 16 colours | The palette texture is 16 wide |
+  | Glyph ramps over 255     | The scramble channel is one byte |
 - CPU error diffusion is throttled, but not moved into a Web Worker yet; the
   `worker` flag is reserved and defaults to `false`
 - Automated browser and visual-regression tests
@@ -847,6 +846,8 @@ own cell:
 | Nearest-palette colour       |  25 fps | 181 fps |
 | Luminance mask               |  32 fps | 181 fps |
 | Two-source blend             |  39 fps | 181 fps |
+| Glyph scramble               |  48 fps | 181 fps |
+| SVG symbols                  | 3.4 fps | 181 fps |
 
 The neighbourhood search costs about 0.3 ms and is switched off entirely when no
 motion is active.

@@ -42,6 +42,11 @@ uniform float u_glyphScramble;
 // jitter offsets, which change on their own ten-per-second clock.
 uniform sampler2D u_cellData;
 uniform bool u_glyphRandom;
+// The first registered symbol. Choosing a symbol per cell needs a tone map,
+// which still selects Canvas, so one texture covers every supported case.
+uniform sampler2D u_symbol;
+uniform bool u_symbolReady;
+uniform float u_symbolScale;
 uniform float u_glyphProbability;
 // Up to PALETTE_LIMIT colours in a 1 x N strip. A texture rather than a uniform
 // array because GLSL ES 1.00 does not guarantee dynamic indexing of arrays.
@@ -307,8 +312,11 @@ vec2 cellPosition(vec2 cell, float toned, out float ambientScale) {
 
 // Antialiased coverage of this fragment by the primitive belonging to a cell.
 float primitiveCoverage(
-  vec2 cell, vec2 css, out vec3 rgb, out float outReveal, out float outToned
+  vec2 cell, vec2 css, out vec3 rgb, out float outReveal, out float outToned,
+  out vec3 symbolRgb, out bool symbolInk
 ) {
+  symbolRgb = vec3(0.0);
+  symbolInk = false;
   outReveal = 0.0;
   outToned = 0.0;
   if (cell.x < 0.0 || cell.y < 0.0 || cell.x >= u_gridSize.x || cell.y >= u_gridSize.y) {
@@ -340,6 +348,19 @@ float primitiveCoverage(
     float radius = min(u_cellSize.x, u_cellSize.y) * 0.5 * scale * u_dotScale;
     float edge = max(u_pixel.x, u_pixel.y) * 0.5;
     return 1.0 - smoothstep(radius - edge, radius + edge, length(delta));
+  }
+
+  if (mode == 6) {
+    // drawImage paints the symbol's own colours, so colorMode does not apply.
+    if (!u_symbolReady) return 0.0;
+    vec2 halfSize = u_cellSize * scale * u_symbolScale * 0.5;
+    if (halfSize.x <= 0.0 || halfSize.y <= 0.0) return 0.0;
+    vec2 uv = delta / (halfSize * 2.0) + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    vec4 texel = texture2D(u_symbol, uv);
+    symbolRgb = texel.rgb;
+    symbolInk = true;
+    return texel.a;
   }
 
   if (mode == 4) {
@@ -428,6 +449,8 @@ void main() {
   float bestReveal = 0.0;
   float bestToned = 0.0;
   vec3 bestRgb = vec3(0.0);
+  vec3 bestSymbolRgb = vec3(0.0);
+  bool bestSymbolInk = false;
 
   for (int dy = -1; dy <= 1; dy++) {
     for (int dx = -1; dx <= 1; dx++) {
@@ -437,14 +460,18 @@ void main() {
       vec3 rgb;
       float reveal;
       float toned;
+      vec3 symbolRgb;
+      bool symbolInk;
       float coverage = primitiveCoverage(
-        cell + vec2(float(dx), float(dy)), css, rgb, reveal, toned
+        cell + vec2(float(dx), float(dy)), css, rgb, reveal, toned, symbolRgb, symbolInk
       );
       if (coverage > bestCoverage) {
         bestCoverage = coverage;
         bestReveal = reveal;
         bestToned = toned;
         bestRgb = rgb;
+        bestSymbolRgb = symbolRgb;
+        bestSymbolInk = symbolInk;
       }
     }
   }
@@ -454,7 +481,9 @@ void main() {
     return;
   }
 
-  vec4 ink = inkColor(bestRgb, bestToned);
+  vec4 ink = bestSymbolInk
+    ? vec4(bestSymbolRgb, u_foreground.a)
+    : inkColor(bestRgb, bestToned);
   // Source-over of the ink onto the background, matching the Canvas renderer
   // filling the background first and then drawing at globalAlpha = reveal.
   float srcAlpha = bestCoverage * bestReveal * ink.a;
@@ -472,7 +501,8 @@ const SUPPORTED_MODES = new Set<RenderMode>([
   'blocks',
   'halftone',
   'ascii',
-  'hybrid'
+  'hybrid',
+  'symbols'
 ]);
 
 const ALGORITHMS: Partial<Record<DitherAlgorithm, number>> = {
@@ -516,6 +546,9 @@ const COLOR_MODES: Record<AgencyDitherOptions['colorMode'], number> = {
 
 /** Matches PALETTE_LIMIT in the shader. */
 const PALETTE_LIMIT = 16;
+
+/** Symbols are rasterised to this square before upload. */
+const SYMBOL_TEXTURE_SIZE = 256;
 
 const SUFFIX = ' requires the Canvas renderer';
 const UNSUPPORTED_MODE = `This mode${SUFFIX}`;
@@ -567,6 +600,9 @@ interface WebGLUniforms {
   cellData: WebGLUniformLocation;
   glyphRandom: WebGLUniformLocation;
   glyphProbability: WebGLUniformLocation;
+  symbol: WebGLUniformLocation;
+  symbolReady: WebGLUniformLocation;
+  symbolScale: WebGLUniformLocation;
   palette: WebGLUniformLocation;
   paletteCount: WebGLUniformLocation;
   paletteMix: WebGLUniformLocation;
@@ -768,6 +804,10 @@ export class WebGLRenderer implements DitherRenderer {
   private uploadedMask: SourceFrame | null = null;
   private secondaryTexture!: WebGLTexture;
   private cellDataTexture!: WebGLTexture;
+  private symbolTexture!: WebGLTexture;
+  private readonly symbols = new Map<string, CanvasImageSource>();
+  private symbolName = '';
+  private symbolReady = false;
   private cellData = new Uint8Array(0);
   private cellDataKey = '';
   private uploadedSecondary: SourceFrame | null = null;
@@ -868,6 +908,11 @@ export class WebGLRenderer implements DitherRenderer {
     this.cellDataTexture = gl.createTexture() ?? (() => {
       throw new Error('AgencyDitherFX could not create a WebGL texture.');
     })();
+    this.symbolTexture = gl.createTexture() ?? (() => {
+      throw new Error('AgencyDitherFX could not create a WebGL texture.');
+    })();
+    // A restored context loses the upload; the caller re-registers symbols.
+    this.symbolReady = false;
     this.uploadedSecondary = null;
     this.cellDataKey = '';
     this.paletteKey = '';
@@ -890,6 +935,9 @@ export class WebGLRenderer implements DitherRenderer {
       cellData: getUniform(gl, this.program, 'u_cellData'),
       glyphRandom: getUniform(gl, this.program, 'u_glyphRandom'),
       glyphProbability: getUniform(gl, this.program, 'u_glyphProbability'),
+      symbol: getUniform(gl, this.program, 'u_symbol'),
+      symbolReady: getUniform(gl, this.program, 'u_symbolReady'),
+      symbolScale: getUniform(gl, this.program, 'u_symbolScale'),
       palette: getUniform(gl, this.program, 'u_palette'),
       paletteCount: getUniform(gl, this.program, 'u_paletteCount'),
       paletteMix: getUniform(gl, this.program, 'u_paletteMix'),
@@ -1005,12 +1053,54 @@ export class WebGLRenderer implements DitherRenderer {
     this.prepareGrid(options);
   }
 
-  setSymbol(): void {
-    // Symbol drawing remains on the Canvas renderer until a glyph/symbol atlas exists.
+  setSymbol(name: string, image: CanvasImageSource): void {
+    this.symbols.set(name, image);
+    // Only the first symbol is reachable without a tone map, and a tone map
+    // still selects Canvas, so that is the one that gets uploaded.
+    if (this.symbolName && this.symbolName !== name) return;
+    this.symbolName = name;
+    this.uploadSymbol(image);
   }
 
-  removeSymbol(): void {
-    // Symbol drawing remains on the Canvas renderer until a glyph/symbol atlas exists.
+  removeSymbol(name: string): void {
+    this.symbols.delete(name);
+    if (this.symbolName !== name) return;
+    const next = this.symbols.entries().next().value;
+    this.symbolName = next ? next[0] : '';
+    if (next) this.uploadSymbol(next[1]);
+    else this.symbolReady = false;
+  }
+
+  private uploadSymbol(image: CanvasImageSource): void {
+    if (this.contextLost) return;
+    const gl = this.gl;
+    this.symbolReady = false;
+    try {
+      // Rasterise to a fixed power-of-two canvas rather than handing the SVG
+      // image straight to texImage2D: an SVG element carries no reliable
+      // intrinsic size, and uploading one produced an incomplete texture that
+      // sampled as opaque black.
+      const canvas = document.createElement('canvas');
+      canvas.width = SYMBOL_TEXTURE_SIZE;
+      canvas.height = SYMBOL_TEXTURE_SIZE;
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      context.clearRect(0, 0, SYMBOL_TEXTURE_SIZE, SYMBOL_TEXTURE_SIZE);
+      context.drawImage(image, 0, 0, SYMBOL_TEXTURE_SIZE, SYMBOL_TEXTURE_SIZE);
+
+      gl.activeTexture(gl.TEXTURE7);
+      gl.bindTexture(gl.TEXTURE_2D, this.symbolTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+      this.symbolReady = gl.getError() === gl.NO_ERROR;
+    } catch {
+      this.symbolReady = false;
+    } finally {
+      gl.activeTexture(gl.TEXTURE0);
+    }
   }
 
   destroy(): void {
@@ -1030,6 +1120,7 @@ export class WebGLRenderer implements DitherRenderer {
       this.gl.deleteTexture(this.maskTexture);
       this.gl.deleteTexture(this.secondaryTexture);
       this.gl.deleteTexture(this.cellDataTexture);
+      this.gl.deleteTexture(this.symbolTexture);
       this.gl.deleteProgram(this.program);
       // Frees the backing context immediately instead of waiting for GC, which
       // matters when instances are created and torn down across route changes.
@@ -1111,6 +1202,11 @@ export class WebGLRenderer implements DitherRenderer {
       options.glyphSelection === 'random' ? 1 : 0
     );
     gl.uniform1f(this.uniforms.glyphProbability, clamp(options.glyphProbability));
+    gl.uniform1i(this.uniforms.symbolReady, this.symbolReady ? 1 : 0);
+    if (options.mode === 'symbols' && !this.symbolReady) {
+      warning = 'No symbol is registered, so nothing is drawn';
+    }
+    gl.uniform1f(this.uniforms.symbolScale, options.symbolScale);
     this.updatePalette(options);
     gl.uniform1f(
       this.uniforms.paletteCount,
@@ -1138,6 +1234,7 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1i(this.uniforms.mask, 4);
     gl.uniform1i(this.uniforms.secondary, 5);
     gl.uniform1i(this.uniforms.cellData, 6);
+    gl.uniform1i(this.uniforms.symbol, 7);
     gl.uniform2f(this.uniforms.cssSize, this.cssWidth, this.cssHeight);
     gl.uniform2f(this.uniforms.gridSize, this.columns, this.rows);
     gl.uniform4f(this.uniforms.drawRect, drawX, drawY, drawWidth, drawHeight);
@@ -1567,6 +1664,7 @@ export class WebGLRenderer implements DitherRenderer {
     if (mode === 'dots' || mode === 'halftone') return 1;
     if (mode === 'ascii') return 4;
     if (mode === 'hybrid') return 5;
+    if (mode === 'symbols') return 6;
     return 2;
   }
 
