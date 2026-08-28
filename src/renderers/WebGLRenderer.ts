@@ -21,6 +21,8 @@ void main() {
 const FRAGMENT_SHADER = `
 precision mediump float;
 
+#define PALETTE_LIMIT 16.0
+
 uniform sampler2D u_source;
 // Per-cell noise baked on the CPU with the same integer hash the Canvas
 // renderer uses. GLSL ES 1.00 has no bitwise operators, so the hash cannot be
@@ -34,6 +36,12 @@ uniform sampler2D u_glyphAtlas;
 uniform float u_glyphCount;
 uniform vec2 u_glyphTile;
 uniform bool u_glyphReady;
+// Up to PALETTE_LIMIT colours in a 1 x N strip. A texture rather than a uniform
+// array because GLSL ES 1.00 does not guarantee dynamic indexing of arrays.
+uniform sampler2D u_palette;
+uniform float u_paletteCount;
+uniform float u_paletteMix;
+uniform bool u_foregroundTransparent;
 uniform vec2 u_cssSize;
 uniform vec2 u_gridSize;
 uniform vec4 u_drawRect;
@@ -46,6 +54,7 @@ uniform float u_brightness;
 uniform float u_gamma;
 uniform float u_noiseAmount;
 uniform float u_dotScale;
+uniform float u_primitiveMix;
 uniform float u_revealProgress;
 uniform float u_staggerAmount;
 uniform bool u_stagger;
@@ -239,8 +248,11 @@ vec2 cellPosition(vec2 cell, float toned, out float ambientScale) {
 }
 
 // Antialiased coverage of this fragment by the primitive belonging to a cell.
-float primitiveCoverage(vec2 cell, vec2 css, out vec3 rgb, out float outReveal) {
+float primitiveCoverage(
+  vec2 cell, vec2 css, out vec3 rgb, out float outReveal, out float outToned
+) {
   outReveal = 0.0;
+  outToned = 0.0;
   if (cell.x < 0.0 || cell.y < 0.0 || cell.x >= u_gridSize.x || cell.y >= u_gridSize.y) {
     return 0.0;
   }
@@ -250,19 +262,26 @@ float primitiveCoverage(vec2 cell, vec2 css, out vec3 rgb, out float outReveal) 
   float reveal = revealForCell(cell);
   if (reveal <= 0.0) return 0.0;
 
+  outToned = toned;
   float ambientScale;
   vec2 pos = cellPosition(cell, toned, ambientScale);
   float scale = (0.15 + dithered * 0.85) * (0.35 + reveal * 0.65) * ambientScale;
   vec2 delta = css - pos;
   outReveal = reveal;
 
-  if (u_mode == 1 || u_mode == 3) {
+  // Hybrid resolves to one of the other primitives per cell, keyed on tone.
+  int mode = u_mode;
+  if (mode == 5) {
+    mode = toned < u_primitiveMix * 0.5 ? 2 : (toned < 0.75 ? 1 : 4);
+  }
+
+  if (mode == 1 || mode == 3) {
     float radius = min(u_cellSize.x, u_cellSize.y) * 0.5 * scale * u_dotScale;
     float edge = max(u_pixel.x, u_pixel.y) * 0.5;
     return 1.0 - smoothstep(radius - edge, radius + edge, length(delta));
   }
 
-  if (u_mode == 4) {
+  if (mode == 4) {
     if (!u_glyphReady) return 0.0;
     // Glyphs are drawn at a fixed size; the Canvas renderer does not scale them
     // by tone, it only picks a different character.
@@ -281,6 +300,35 @@ float primitiveCoverage(vec2 cell, vec2 css, out vec3 rgb, out float outReveal) 
   vec2 edge = u_pixel * 0.5;
   vec2 fade = vec2(1.0) - smoothstep(halfSize - edge, halfSize + edge, abs(delta));
   return fade.x * fade.y;
+}
+
+// Per-cell ink, matching CanvasRenderer.cellColor.
+vec4 inkColor(vec3 rgb, float toned) {
+  if (u_colorMode == 1) {
+    // Canvas quantises the sampled colour to 12 bits before using it.
+    return vec4(floor(rgb * 255.0 / 16.0) * 17.0 / 255.0, u_foreground.a);
+  }
+  if (u_colorMode == 3) {
+    float index = min(u_paletteCount - 1.0, floor(toned * u_paletteCount));
+    vec3 entry = texture2D(u_palette, vec2((index + 0.5) / PALETTE_LIMIT, 0.5)).rgb;
+    return vec4(entry, u_foreground.a);
+  }
+  if (u_colorMode == 2) {
+    vec3 nearest = u_foreground.rgb;
+    float best = 1.0e9;
+    for (int i = 0; i < int(PALETTE_LIMIT); i++) {
+      if (float(i) >= u_paletteCount) break;
+      vec3 entry = texture2D(u_palette, vec2((float(i) + 0.5) / PALETTE_LIMIT, 0.5)).rgb;
+      vec3 d = (rgb - entry) * 255.0;
+      float distance = dot(d, d);
+      if (distance < best) {
+        best = distance;
+        nearest = entry;
+      }
+    }
+    return vec4(mix(rgb, nearest, u_paletteMix), u_foreground.a);
+  }
+  return u_foreground;
 }
 
 void main() {
@@ -303,6 +351,7 @@ void main() {
 
   float bestCoverage = 0.0;
   float bestReveal = 0.0;
+  float bestToned = 0.0;
   vec3 bestRgb = vec3(0.0);
 
   for (int dy = -1; dy <= 1; dy++) {
@@ -312,23 +361,25 @@ void main() {
       if (u_neighborhood == 0 && (dx != 0 || dy != 0)) continue;
       vec3 rgb;
       float reveal;
+      float toned;
       float coverage = primitiveCoverage(
-        cell + vec2(float(dx), float(dy)), css, rgb, reveal
+        cell + vec2(float(dx), float(dy)), css, rgb, reveal, toned
       );
       if (coverage > bestCoverage) {
         bestCoverage = coverage;
         bestReveal = reveal;
+        bestToned = toned;
         bestRgb = rgb;
       }
     }
   }
 
-  if (bestCoverage <= 0.0) {
+  if (bestCoverage <= 0.0 || (u_foregroundTransparent && u_colorMode == 0)) {
     gl_FragColor = background;
     return;
   }
 
-  vec4 ink = u_colorMode == 1 ? vec4(bestRgb, u_foreground.a) : u_foreground;
+  vec4 ink = inkColor(bestRgb, bestToned);
   // Source-over of the ink onto the background, matching the Canvas renderer
   // filling the background first and then drawing at globalAlpha = reveal.
   float srcAlpha = bestCoverage * bestReveal * ink.a;
@@ -345,7 +396,8 @@ const SUPPORTED_MODES = new Set<RenderMode>([
   'dots',
   'blocks',
   'halftone',
-  'ascii'
+  'ascii',
+  'hybrid'
 ]);
 
 const ALGORITHMS: Partial<Record<DitherAlgorithm, number>> = {
@@ -380,10 +432,19 @@ const STAGGER: Record<AgencyDitherOptions['staggerFrom'], number> = {
 // because a bilinear fetch only reads four texels and undersamples past 2x.
 const GLYPH_SUPERSAMPLE = 1;
 
+const COLOR_MODES: Record<AgencyDitherOptions['colorMode'], number> = {
+  monochrome: 0,
+  source: 1,
+  palette: 2,
+  brightness: 3
+};
+
+/** Matches PALETTE_LIMIT in the shader. */
+const PALETTE_LIMIT = 16;
+
 const SUFFIX = ' requires the Canvas renderer';
 const UNSUPPORTED_MODE = `This mode${SUFFIX}`;
 const UNSUPPORTED_ALGORITHM = `This algorithm${SUFFIX}`;
-const UNSUPPORTED_COLOR_MODE = `This color mode${SUFFIX}`;
 
 const MODE_REASON: Partial<Record<RenderMode, string>> = {
   ascii: `ascii mode${SUFFIX}`,
@@ -396,11 +457,6 @@ const ALGORITHM_REASON: Partial<Record<DitherAlgorithm, string>> = {
   atkinson: `atkinson${SUFFIX}`,
   stucki: `stucki${SUFFIX}`,
   jarvis: `jarvis${SUFFIX}`
-};
-
-const COLOR_MODE_REASON: Partial<Record<AgencyDitherOptions['colorMode'], string>> = {
-  palette: `palette color mode${SUFFIX}`,
-  brightness: `brightness color mode${SUFFIX}`
 };
 
 const AMBIENT: Record<AgencyDitherOptions['ambientMode'], number> = {
@@ -433,6 +489,11 @@ interface WebGLUniforms {
   glyphCount: WebGLUniformLocation;
   glyphTile: WebGLUniformLocation;
   glyphReady: WebGLUniformLocation;
+  palette: WebGLUniformLocation;
+  paletteCount: WebGLUniformLocation;
+  paletteMix: WebGLUniformLocation;
+  foregroundTransparent: WebGLUniformLocation;
+  primitiveMix: WebGLUniformLocation;
   stagger: WebGLUniformLocation;
   cssSize: WebGLUniformLocation;
   gridSize: WebGLUniformLocation;
@@ -604,11 +665,8 @@ export class WebGLRenderer implements DitherRenderer {
     }
     if (mask?.ready) return 'Masks require the Canvas renderer';
     if (options.toneMap.length) return 'Tone maps require the Canvas renderer';
-    if (options.colorMode !== 'monochrome' && options.colorMode !== 'source') {
-      return COLOR_MODE_REASON[options.colorMode] ?? UNSUPPORTED_COLOR_MODE;
-    }
-    if (options.foregroundTransparent) {
-      return 'Foreground transparency requires the Canvas renderer';
+    if (options.palette.length > PALETTE_LIMIT) {
+      return `Palettes over ${PALETTE_LIMIT} colours require the Canvas renderer`;
     }
     if (options.blur > 0) return 'Source blur requires the Canvas renderer';
     // Rotation, displacement, ripple, pointer push and the drift, wave, orbit
@@ -632,6 +690,8 @@ export class WebGLRenderer implements DitherRenderer {
   private texture!: WebGLTexture;
   private noiseTexture!: WebGLTexture;
   private glyphTexture!: WebGLTexture;
+  private paletteTexture!: WebGLTexture;
+  private paletteKey = '';
   private glyphKey = '';
   private glyphCount = 1;
   private glyphTileCss = 0;
@@ -713,6 +773,10 @@ export class WebGLRenderer implements DitherRenderer {
     this.glyphTexture = gl.createTexture() ?? (() => {
       throw new Error('AgencyDitherFX could not create a WebGL texture.');
     })();
+    this.paletteTexture = gl.createTexture() ?? (() => {
+      throw new Error('AgencyDitherFX could not create a WebGL texture.');
+    })();
+    this.paletteKey = '';
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
     this.glyphKey = '';
     this.glyphReady = false;
@@ -727,6 +791,11 @@ export class WebGLRenderer implements DitherRenderer {
       glyphCount: getUniform(gl, this.program, 'u_glyphCount'),
       glyphTile: getUniform(gl, this.program, 'u_glyphTile'),
       glyphReady: getUniform(gl, this.program, 'u_glyphReady'),
+      palette: getUniform(gl, this.program, 'u_palette'),
+      paletteCount: getUniform(gl, this.program, 'u_paletteCount'),
+      paletteMix: getUniform(gl, this.program, 'u_paletteMix'),
+      foregroundTransparent: getUniform(gl, this.program, 'u_foregroundTransparent'),
+      primitiveMix: getUniform(gl, this.program, 'u_primitiveMix'),
       stagger: getUniform(gl, this.program, 'u_stagger'),
       cssSize: getUniform(gl, this.program, 'u_cssSize'),
       gridSize: getUniform(gl, this.program, 'u_gridSize'),
@@ -793,6 +862,12 @@ export class WebGLRenderer implements DitherRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.activeTexture(gl.TEXTURE0);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     // sourceUv is already expressed in top-down CSS coordinates.
@@ -835,6 +910,7 @@ export class WebGLRenderer implements DitherRenderer {
       this.gl.deleteTexture(this.texture);
       this.gl.deleteTexture(this.noiseTexture);
       this.gl.deleteTexture(this.glyphTexture);
+      this.gl.deleteTexture(this.paletteTexture);
       this.gl.deleteProgram(this.program);
       // Frees the backing context immediately instead of waiting for GC, which
       // matters when instances are created and torn down across route changes.
@@ -904,6 +980,17 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1f(this.uniforms.glyphCount, this.glyphCount);
     gl.uniform2f(this.uniforms.glyphTile, this.glyphTileCss, this.glyphTileCss);
     gl.uniform1i(this.uniforms.glyphReady, this.glyphReady ? 1 : 0);
+    this.updatePalette(options);
+    gl.uniform1f(
+      this.uniforms.paletteCount,
+      Math.max(1, Math.min(PALETTE_LIMIT, options.palette.length))
+    );
+    gl.uniform1f(this.uniforms.paletteMix, clamp(options.paletteMix));
+    gl.uniform1i(
+      this.uniforms.foregroundTransparent,
+      options.foregroundTransparent ? 1 : 0
+    );
+    gl.uniform1f(this.uniforms.primitiveMix, options.primitiveMix);
 
     const [drawX, drawY, drawWidth, drawHeight] = this.drawRect(source, options);
     const foreground = rgba(options.foreground);
@@ -914,6 +1001,7 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1i(this.uniforms.source, 0);
     gl.uniform1i(this.uniforms.noise, 1);
     gl.uniform1i(this.uniforms.glyphAtlas, 2);
+    gl.uniform1i(this.uniforms.palette, 3);
     gl.uniform2f(this.uniforms.cssSize, this.cssWidth, this.cssHeight);
     gl.uniform2f(this.uniforms.gridSize, this.columns, this.rows);
     gl.uniform4f(this.uniforms.drawRect, drawX, drawY, drawWidth, drawHeight);
@@ -938,7 +1026,7 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform4f(this.uniforms.background, ...background);
     gl.uniform1i(this.uniforms.mode, mode);
     gl.uniform1i(this.uniforms.algorithm, algorithm);
-    gl.uniform1i(this.uniforms.colorMode, options.colorMode === 'source' ? 1 : 0);
+    gl.uniform1i(this.uniforms.colorMode, COLOR_MODES[options.colorMode] ?? 0);
     gl.uniform1i(this.uniforms.staggerFrom, STAGGER[options.staggerFrom]);
     gl.uniform1i(this.uniforms.invert, options.invert ? 1 : 0);
     gl.uniform1i(
@@ -1124,6 +1212,29 @@ export class WebGLRenderer implements DitherRenderer {
     return true;
   }
 
+  /** Uploads the palette as a 1 x PALETTE_LIMIT strip when it changes. */
+  private updatePalette(options: AgencyDitherOptions): void {
+    const key = options.palette.join(',');
+    if (key === this.paletteKey) return;
+    this.paletteKey = key;
+    const data = new Uint8Array(PALETTE_LIMIT * 4);
+    const count = Math.min(PALETTE_LIMIT, options.palette.length);
+    for (let index = 0; index < count; index += 1) {
+      const [r, g, b] = hexToRgb(options.palette[index] ?? '#000000');
+      data[index * 4] = r;
+      data[index * 4 + 1] = g;
+      data[index * 4 + 2] = b;
+      data[index * 4 + 3] = 255;
+    }
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA, PALETTE_LIMIT, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data
+    );
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
   private drawRect(
     source: SourceFrame,
     options: AgencyDitherOptions
@@ -1150,6 +1261,7 @@ export class WebGLRenderer implements DitherRenderer {
     if (mode === 'raw-dither') return 0;
     if (mode === 'dots' || mode === 'halftone') return 1;
     if (mode === 'ascii') return 4;
+    if (mode === 'hybrid') return 5;
     return 2;
   }
 
