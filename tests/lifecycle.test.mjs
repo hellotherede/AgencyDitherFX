@@ -93,25 +93,26 @@ test('constructor sources wait for viewport activation', () => {
   fx.destroy();
 
   // WebGL is the default renderer, so count requests relative to a baseline
-  // rather than from zero.
-  const asciiBaseline = webglRequests;
-  const asciiFx = new AgencyDitherFX(new FakeElement(), {
+  // rather than from zero. Error diffusion is sequential and cannot be
+  // expressed in a fragment shader, so it still selects Canvas outright.
+  const diffusionBaseline = webglRequests;
+  const diffusionFx = new AgencyDitherFX(new FakeElement(), {
     renderer: 'webgl',
-    mode: 'ascii',
+    algorithm: 'floyd-steinberg',
     immediate: true
   });
   assert.equal(
     webglRequests,
-    asciiBaseline,
-    'ASCII should select Canvas without trying WebGL'
+    diffusionBaseline,
+    'error diffusion should select Canvas without trying WebGL'
   );
-  asciiFx.set({ mode: 'dots' });
+  diffusionFx.set({ algorithm: 'bayer8' });
   assert.equal(
     webglRequests,
-    asciiBaseline + 1,
+    diffusionBaseline + 1,
     'compatible settings should try WebGL again'
   );
-  asciiFx.destroy();
+  diffusionFx.destroy();
 
   // A WebGL context is only taken once an instance is actually running, so an
   // off-screen section must not consume a slot just by being constructed.

@@ -28,6 +28,11 @@ uniform sampler2D u_source;
 // R = hash(x, y, frame) for value noise and the random algorithm.
 // G = the averaged pair the blue-noise algorithm uses.
 uniform sampler2D u_noise;
+// Glyph ramp rendered once into a strip of tiles, one per ramp entry, at device
+// resolution. Sampling it is what lets ASCII run on the GPU at all.
+uniform sampler2D u_glyphAtlas;
+uniform float u_glyphCount;
+uniform vec2 u_glyphTile;
 uniform vec2 u_cssSize;
 uniform vec2 u_gridSize;
 uniform vec4 u_drawRect;
@@ -253,6 +258,15 @@ float primitiveCoverage(vec2 cell, vec2 css, out vec3 rgb, out float outReveal) 
     return 1.0 - smoothstep(radius - edge, radius + edge, length(delta));
   }
 
+  if (u_mode == 4) {
+    // Glyphs are drawn at a fixed size; the Canvas renderer does not scale them
+    // by tone, it only picks a different character.
+    vec2 uv = delta / u_glyphTile + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+    float index = floor(dithered * (u_glyphCount - 1.0) + 0.5);
+    return texture2D(u_glyphAtlas, vec2((index + uv.x) / u_glyphCount, uv.y)).a;
+  }
+
   if (u_rotation != 0.0) {
     float c = cos(-u_rotation);
     float s = sin(-u_rotation);
@@ -325,7 +339,8 @@ const SUPPORTED_MODES = new Set<RenderMode>([
   'raw-dither',
   'dots',
   'blocks',
-  'halftone'
+  'halftone',
+  'ascii'
 ]);
 
 const ALGORITHMS: Partial<Record<DitherAlgorithm, number>> = {
@@ -354,6 +369,10 @@ const STAGGER: Record<AgencyDitherOptions['staggerFrom'], number> = {
   'bottom-right': 11,
   random: 12
 };
+
+// Atlas tiles are rendered above device resolution so the bilinear fetch
+// averages several samples, which lands closer to Canvas's own antialiasing.
+const GLYPH_SUPERSAMPLE = 2;
 
 const SUFFIX = ' requires the Canvas renderer';
 const UNSUPPORTED_MODE = `This mode${SUFFIX}`;
@@ -404,6 +423,9 @@ const hash = (x: number, y: number, seed: number): number => {
 interface WebGLUniforms {
   source: WebGLUniformLocation;
   noise: WebGLUniformLocation;
+  glyphAtlas: WebGLUniformLocation;
+  glyphCount: WebGLUniformLocation;
+  glyphTile: WebGLUniformLocation;
   cssSize: WebGLUniformLocation;
   gridSize: WebGLUniformLocation;
   drawRect: WebGLUniformLocation;
@@ -563,6 +585,9 @@ export class WebGLRenderer implements DitherRenderer {
     if (options.glyphSelection !== 'tone') {
       return 'Random glyph selection requires the Canvas renderer';
     }
+    if (options.mode === 'ascii' && options.glyphScramble > 0) {
+      return 'Glyph scramble requires the Canvas renderer';
+    }
     if (!(options.algorithm in ALGORITHMS)) {
       return ALGORITHM_REASON[options.algorithm] ?? UNSUPPORTED_ALGORITHM;
     }
@@ -598,6 +623,12 @@ export class WebGLRenderer implements DitherRenderer {
   private program!: WebGLProgram;
   private texture!: WebGLTexture;
   private noiseTexture!: WebGLTexture;
+  private glyphTexture!: WebGLTexture;
+  private glyphKey = '';
+  private glyphCount = 1;
+  private glyphTileCss = 0;
+  private glyphReady = false;
+  private maxTextureSize = 4096;
   private buffer!: WebGLBuffer;
   private uniforms!: WebGLUniforms;
   private contextLost = false;
@@ -670,6 +701,12 @@ export class WebGLRenderer implements DitherRenderer {
     this.noiseTexture = gl.createTexture() ?? (() => {
       throw new Error('AgencyDitherFX could not create a WebGL texture.');
     })();
+    this.glyphTexture = gl.createTexture() ?? (() => {
+      throw new Error('AgencyDitherFX could not create a WebGL texture.');
+    })();
+    this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
+    this.glyphKey = '';
+    this.glyphReady = false;
     // A restored context starts with an empty noise texture, so force a rebuild.
     this.noiseColumns = 0;
     this.noiseRows = 0;
@@ -677,6 +714,9 @@ export class WebGLRenderer implements DitherRenderer {
     this.uniforms = {
       source: getUniform(gl, this.program, 'u_source'),
       noise: getUniform(gl, this.program, 'u_noise'),
+      glyphAtlas: getUniform(gl, this.program, 'u_glyphAtlas'),
+      glyphCount: getUniform(gl, this.program, 'u_glyphCount'),
+      glyphTile: getUniform(gl, this.program, 'u_glyphTile'),
       cssSize: getUniform(gl, this.program, 'u_cssSize'),
       gridSize: getUniform(gl, this.program, 'u_gridSize'),
       drawRect: getUniform(gl, this.program, 'u_drawRect'),
@@ -736,6 +776,12 @@ export class WebGLRenderer implements DitherRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.glyphTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.activeTexture(gl.TEXTURE0);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     // sourceUv is already expressed in top-down CSS coordinates.
@@ -777,6 +823,7 @@ export class WebGLRenderer implements DitherRenderer {
       this.gl.deleteBuffer(this.buffer);
       this.gl.deleteTexture(this.texture);
       this.gl.deleteTexture(this.noiseTexture);
+      this.gl.deleteTexture(this.glyphTexture);
       this.gl.deleteProgram(this.program);
       // Frees the backing context immediately instead of waiting for GC, which
       // matters when instances are created and torn down across route changes.
@@ -840,6 +887,11 @@ export class WebGLRenderer implements DitherRenderer {
     }
 
     this.updateNoise(options, time);
+    if (options.mode === 'ascii' && !this.updateGlyphAtlas(options)) {
+      warning = 'Glyph atlas too large for this device; Canvas renderer is recommended';
+    }
+    gl.uniform1f(this.uniforms.glyphCount, this.glyphCount);
+    gl.uniform2f(this.uniforms.glyphTile, this.glyphTileCss, this.glyphTileCss);
 
     const [drawX, drawY, drawWidth, drawHeight] = this.drawRect(source, options);
     const foreground = rgba(options.foreground);
@@ -849,6 +901,7 @@ export class WebGLRenderer implements DitherRenderer {
 
     gl.uniform1i(this.uniforms.source, 0);
     gl.uniform1i(this.uniforms.noise, 1);
+    gl.uniform1i(this.uniforms.glyphAtlas, 2);
     gl.uniform2f(this.uniforms.cssSize, this.cssWidth, this.cssHeight);
     gl.uniform2f(this.uniforms.gridSize, this.columns, this.rows);
     gl.uniform4f(this.uniforms.drawRect, drawX, drawY, drawWidth, drawHeight);
@@ -897,7 +950,10 @@ export class WebGLRenderer implements DitherRenderer {
       rippleStrength > 0 ||
       mouseInfluence > 0 ||
       // A rotated square's corners reach beyond its own cell.
-      (options.rotation !== 0 && options.mode !== 'dots' && options.mode !== 'halftone');
+      (options.rotation !== 0 && options.mode !== 'dots' && options.mode !== 'halftone') ||
+      // Glyphs are drawn from the cell centre at roughly cell size and routinely
+      // overhang their neighbours.
+      options.mode === 'ascii';
 
     gl.uniform1i(this.uniforms.neighborhood, moves ? 1 : 0);
     gl.uniform1f(this.uniforms.rotation, options.rotation * Math.PI / 180);
@@ -1001,6 +1057,54 @@ export class WebGLRenderer implements DitherRenderer {
     gl.activeTexture(gl.TEXTURE0);
   }
 
+  /**
+   * Renders the glyph ramp into a horizontal strip of tiles, one per entry, at
+   * device resolution. Rebuilt only when the ramp, font or cell size changes.
+   * Returns false when the strip would exceed the maximum texture size, which
+   * sends the instance back to Canvas.
+   */
+  private updateGlyphAtlas(options: AgencyDitherOptions): boolean {
+    const gl = this.gl;
+    const ramp = Array.from(options.glyphRamp || ' ');
+    const count = Math.max(1, ramp.length);
+    const fontSize = Math.max(2, this.cellHeight * 0.98);
+    const pixelScale = this.canvas.width / Math.max(1, this.cssWidth);
+    // Twice the cell so wide glyphs and descenders are not clipped.
+    const tileCss = Math.max(this.cellWidth, this.cellHeight) * 2;
+    const tile = Math.max(1, Math.ceil(tileCss * pixelScale * GLYPH_SUPERSAMPLE));
+    const key =
+      `${options.glyphRamp}|${fontSize}|${options.fontFamily}|${options.fontWeight}|${tile}`;
+    this.glyphCount = count;
+    this.glyphTileCss = tileCss;
+    if (key === this.glyphKey) return this.glyphReady;
+
+    this.glyphKey = key;
+    this.glyphReady = false;
+    if (tile * count > this.maxTextureSize) return false;
+
+    const atlas = document.createElement('canvas');
+    atlas.width = tile * count;
+    atlas.height = tile;
+    const ctx = atlas.getContext('2d');
+    if (!ctx) return false;
+    ctx.clearRect(0, 0, atlas.width, atlas.height);
+    ctx.font = `${options.fontWeight} ${fontSize * pixelScale}px ${options.fontFamily}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff';
+    const half = tile * 0.5;
+    for (let index = 0; index < count; index += 1) {
+      ctx.fillText(ramp[index] ?? ' ', index * tile + half, half);
+    }
+
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.glyphTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas);
+    gl.activeTexture(gl.TEXTURE0);
+    this.glyphReady = true;
+    return true;
+  }
+
   private drawRect(
     source: SourceFrame,
     options: AgencyDitherOptions
@@ -1026,6 +1130,7 @@ export class WebGLRenderer implements DitherRenderer {
   private mode(mode: RenderMode): number {
     if (mode === 'raw-dither') return 0;
     if (mode === 'dots' || mode === 'halftone') return 1;
+    if (mode === 'ascii') return 4;
     return 2;
   }
 

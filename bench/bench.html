@@ -114,7 +114,8 @@
         { id: 'gl-displacement-video',  dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', displacement: 0.4 } },
         { id: 'displacement-video',     dynamic: true,  opts: { mode: 'dots', displacement: 0.4 } },
         { id: 'gl-rotation-video',      dynamic: true,  opts: { mode: 'blocks', renderer: 'webgl', rotation: 30 } },
-        { id: 'rotation-video',         dynamic: true,  opts: { mode: 'blocks', rotation: 30 } }
+        { id: 'rotation-video',         dynamic: true,  opts: { mode: 'blocks', rotation: 30 } },
+        { id: 'gl-ascii-video',         dynamic: true,  opts: { mode: 'ascii', renderer: 'webgl' } }
       ];
 
       const median = (a) => {
@@ -413,7 +414,8 @@
           { id: 'ambient-pulse',   opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'pulse', ambientAmount: 0.4 } },
           { id: 'ambient-wave',    opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'wave', ambientAmount: 0.3 } },
           { id: 'displacement',    opts: { mode: 'dots', noiseAmount: 0, displacement: 0.4 } },
-          { id: 'rotation-blocks', opts: { mode: 'blocks', noiseAmount: 0, rotation: 30 } }
+          { id: 'rotation-blocks', opts: { mode: 'blocks', noiseAmount: 0, rotation: 30 } },
+          { id: 'ascii',           opts: { mode: 'ascii', noiseAmount: 0 } }
         ];
         const out = [];
         for (const cfg of CONFIGS) {
