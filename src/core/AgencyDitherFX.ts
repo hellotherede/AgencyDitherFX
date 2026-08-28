@@ -70,6 +70,8 @@ export class AgencyDitherFX {
   private oneShot = false;
   private lastRender = 0;
   private renderListeners = 0;
+  private fallbackNoticeKey = '';
+  private fallbackNotice = '';
   private frameTimes: number[] = [];
   // Tweens target this.params, so they keep the instance (and its render
   // callback) alive after destroy() unless they are killed explicitly.
@@ -786,8 +788,18 @@ export class AgencyDitherFX {
             this.maskSource.current
           )
         : '';
-      this.stats.warning = reason ||
-        `${this.params.renderer} requested; ${this.stats.renderer} fallback is active`;
+      if (reason) {
+        this.stats.warning = reason;
+      } else {
+        // Built once per renderer pairing rather than on every frame.
+        const pair = `${this.params.renderer}:${this.stats.renderer}`;
+        if (pair !== this.fallbackNoticeKey) {
+          this.fallbackNoticeKey = pair;
+          this.fallbackNotice =
+            `${this.params.renderer} requested; ${this.stats.renderer} fallback is active`;
+        }
+        this.stats.warning = this.fallbackNotice;
+      }
     }
   }
 

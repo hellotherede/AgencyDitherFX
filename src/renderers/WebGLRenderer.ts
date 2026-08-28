@@ -51,6 +51,20 @@ uniform int u_staggerFrom;
 uniform bool u_invert;
 uniform bool u_backgroundTransparent;
 
+// Motion. A primitive displaced by these can spill outside its own cell, so
+// when any of them is active every fragment tests the 3x3 cell neighbourhood
+// instead of only the cell it falls in.
+uniform int u_neighborhood;
+uniform float u_rotation;
+uniform float u_displacement;
+uniform float u_displacePhase;
+uniform int u_ambientMode;
+uniform float u_ambientAmount;
+uniform float u_ambientFrequency;
+uniform float u_ambientElapsed;
+uniform vec3 u_mouse;
+uniform vec4 u_ripple;
+
 varying vec2 v_uv;
 
 float luminance(vec3 color) {
@@ -145,67 +159,160 @@ float revealForCell(vec2 cell) {
   return 1.0 - pow(1.0 - local, 3.0);
 }
 
-void main() {
-  vec2 css = vec2(v_uv.x, 1.0 - v_uv.y) * u_cssSize;
-  vec2 cell = floor(css / max(vec2(1.0), u_cellSize));
+// Tone, noise and dither for one cell. Returns false when the cell samples
+// outside the drawn source rectangle.
+bool cellValue(vec2 cell, out float dithered, out float toned, out vec3 rgb) {
   vec2 center = (cell + 0.5) * u_cellSize;
   vec2 sourceUv = (center - u_drawRect.xy) / u_drawRect.zw;
-  vec4 background = u_backgroundTransparent ? vec4(u_background.rgb, 0.0) : u_background;
-
-  if (
-    sourceUv.x < 0.0 || sourceUv.x > 1.0 ||
-    sourceUv.y < 0.0 || sourceUv.y > 1.0
-  ) {
-    gl_FragColor = background;
-    return;
+  if (sourceUv.x < 0.0 || sourceUv.x > 1.0 || sourceUv.y < 0.0 || sourceUv.y > 1.0) {
+    return false;
   }
-
   vec2 noise = texture2D(u_noise, (cell + 0.5) / u_gridSize).rg;
   vec4 source = texture2D(u_source, sourceUv);
+  rgb = source.rgb;
   float value = luminance(source.rgb);
   value = pow(clamp((value - 0.5) * u_contrast + 0.5 + u_brightness, 0.0, 1.0), u_gamma);
   // Canvas inverts before adding noise, so the noise is not mirrored with it.
   if (u_invert) value = 1.0 - value;
   value = clamp(value + (noise.x - 0.5) * u_noiseAmount, 0.0, 1.0);
-  float threshold = localThreshold(cell, u_threshold, noise);
-  float binary = value >= threshold ? 1.0 : 0.0;
-  float dithered = mix(value, binary, u_ditherAmount);
+  float binary = value >= localThreshold(cell, u_threshold, noise) ? 1.0 : 0.0;
+  dithered = mix(value, binary, u_ditherAmount);
+  // Displacement keys off the sampled tone, not the dithered result.
+  toned = value;
+  return true;
+}
+
+// Where a cell's primitive is actually drawn, mirroring the Canvas renderer's
+// per-cell motion maths.
+vec2 cellPosition(vec2 cell, float toned, out float ambientScale) {
+  vec2 pos = (cell + 0.5) * u_cellSize;
+  ambientScale = 1.0;
+
+  if (u_ambientAmount > 0.0) {
+    float spatial = (cell.x + cell.y * 0.73) * u_ambientFrequency;
+    if (u_ambientMode == 1) {
+      pos.y += sin(u_ambientElapsed * 2.0 + cell.x * u_ambientFrequency) *
+        u_ambientAmount * u_cellSize.y;
+    } else if (u_ambientMode == 2) {
+      float angle = u_ambientElapsed + spatial;
+      pos += vec2(cos(angle), sin(angle)) * u_ambientAmount * u_cellSize;
+    } else if (u_ambientMode == 3) {
+      ambientScale = 1.0 + sin(u_ambientElapsed * 2.0 + spatial) * u_ambientAmount * 0.35;
+    } else {
+      pos.x += cos(u_ambientElapsed + spatial) * u_ambientAmount * u_cellSize.x;
+      pos.y += sin(u_ambientElapsed * 0.83 + spatial) * u_ambientAmount * u_cellSize.y;
+    }
+  }
+
+  if (u_displacement > 0.0) {
+    float phase = toned * 6.2831853 + u_displacePhase;
+    pos.x += cos(phase + cell.x * 0.17) * u_displacement * u_cellSize.x;
+    pos.y += sin(phase + cell.y * 0.13) * u_displacement * u_cellSize.y;
+  }
+
+  if (u_mouse.z > 0.0) {
+    float d = distance(pos, u_mouse.xy);
+    if (d < 140.0) {
+      float force = (1.0 - d / 140.0) * u_mouse.z * u_cellSize.x;
+      float angle = atan(pos.y - u_mouse.y, pos.x - u_mouse.x);
+      pos += vec2(cos(angle), sin(angle)) * force;
+    }
+  }
+
+  if (u_ripple.z > 0.0) {
+    float age = u_ripple.w;
+    float d = distance(pos, u_ripple.xy);
+    float wave = exp(-abs(d - age * 240.0) / 30.0) * sin(d * 0.12 - age * 16.0);
+    pos.y += wave * u_ripple.z * u_cellSize.y;
+  }
+
+  return pos;
+}
+
+// Antialiased coverage of this fragment by the primitive belonging to a cell.
+float primitiveCoverage(vec2 cell, vec2 css, out vec3 rgb, out float outReveal) {
+  outReveal = 0.0;
+  if (cell.x < 0.0 || cell.y < 0.0 || cell.x >= u_gridSize.x || cell.y >= u_gridSize.y) {
+    return 0.0;
+  }
+  float dithered;
+  float toned;
+  if (!cellValue(cell, dithered, toned, rgb)) return 0.0;
   float reveal = revealForCell(cell);
+  if (reveal <= 0.0) return 0.0;
 
-  if (reveal <= 0.0) {
-    gl_FragColor = background;
-    return;
-  }
-
-  vec4 ink = u_colorMode == 1 ? vec4(source.rgb, u_foreground.a) : u_foreground;
-
-  if (u_mode == 0) {
-    gl_FragColor = vec4(vec3(dithered), reveal);
-    return;
-  }
-
-  vec2 local = css - cell * u_cellSize;
-  vec2 cellCenter = u_cellSize * 0.5;
-  float scale = (0.15 + dithered * 0.85) * (0.35 + reveal * 0.65);
-  // Canvas rasterises arcs and rects with antialiasing. A hard inside/outside
-  // test left every primitive edge jagged, which was both a quality regression
-  // and the bulk of the remaining difference between the two renderers.
-  float coverage = 0.0;
+  float ambientScale;
+  vec2 pos = cellPosition(cell, toned, ambientScale);
+  float scale = (0.15 + dithered * 0.85) * (0.35 + reveal * 0.65) * ambientScale;
+  vec2 delta = css - pos;
+  outReveal = reveal;
 
   if (u_mode == 1 || u_mode == 3) {
     float radius = min(u_cellSize.x, u_cellSize.y) * 0.5 * scale * u_dotScale;
     float edge = max(u_pixel.x, u_pixel.y) * 0.5;
-    coverage = 1.0 - smoothstep(radius - edge, radius + edge, distance(local, cellCenter));
-  } else {
-    vec2 halfSize = u_cellSize * 0.5 * scale;
-    vec2 edge = u_pixel * 0.5;
-    vec2 fade = vec2(1.0) - smoothstep(halfSize - edge, halfSize + edge, abs(local - cellCenter));
-    coverage = fade.x * fade.y;
+    return 1.0 - smoothstep(radius - edge, radius + edge, length(delta));
   }
 
+  if (u_rotation != 0.0) {
+    float c = cos(-u_rotation);
+    float s = sin(-u_rotation);
+    delta = vec2(delta.x * c - delta.y * s, delta.x * s + delta.y * c);
+  }
+  vec2 halfSize = u_cellSize * 0.5 * scale;
+  vec2 edge = u_pixel * 0.5;
+  vec2 fade = vec2(1.0) - smoothstep(halfSize - edge, halfSize + edge, abs(delta));
+  return fade.x * fade.y;
+}
+
+void main() {
+  vec2 css = vec2(v_uv.x, 1.0 - v_uv.y) * u_cssSize;
+  vec2 cell = floor(css / max(vec2(1.0), u_cellSize));
+  vec4 background = u_backgroundTransparent ? vec4(u_background.rgb, 0.0) : u_background;
+
+  if (u_mode == 0) {
+    float dithered;
+    float toned;
+    vec3 rgb;
+    if (!cellValue(cell, dithered, toned, rgb)) {
+      gl_FragColor = background;
+      return;
+    }
+    float reveal = revealForCell(cell);
+    gl_FragColor = reveal <= 0.0 ? background : vec4(vec3(dithered), reveal);
+    return;
+  }
+
+  float bestCoverage = 0.0;
+  float bestReveal = 0.0;
+  vec3 bestRgb = vec3(0.0);
+
+  for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      // Without motion a primitive never leaves its own cell, so the eight
+      // neighbours cannot contribute and are skipped entirely.
+      if (u_neighborhood == 0 && (dx != 0 || dy != 0)) continue;
+      vec3 rgb;
+      float reveal;
+      float coverage = primitiveCoverage(
+        cell + vec2(float(dx), float(dy)), css, rgb, reveal
+      );
+      if (coverage > bestCoverage) {
+        bestCoverage = coverage;
+        bestReveal = reveal;
+        bestRgb = rgb;
+      }
+    }
+  }
+
+  if (bestCoverage <= 0.0) {
+    gl_FragColor = background;
+    return;
+  }
+
+  vec4 ink = u_colorMode == 1 ? vec4(bestRgb, u_foreground.a) : u_foreground;
   // Source-over of the ink onto the background, matching the Canvas renderer
   // filling the background first and then drawing at globalAlpha = reveal.
-  float srcAlpha = coverage * reveal * ink.a;
+  float srcAlpha = bestCoverage * bestReveal * ink.a;
   float outAlpha = srcAlpha + background.a * (1.0 - srcAlpha);
   vec3 outColor = outAlpha > 0.0
     ? (ink.rgb * srcAlpha + background.rgb * background.a * (1.0 - srcAlpha)) / outAlpha
@@ -248,6 +355,38 @@ const STAGGER: Record<AgencyDitherOptions['staggerFrom'], number> = {
   random: 12
 };
 
+const SUFFIX = ' requires the Canvas renderer';
+const UNSUPPORTED_MODE = `This mode${SUFFIX}`;
+const UNSUPPORTED_ALGORITHM = `This algorithm${SUFFIX}`;
+const UNSUPPORTED_COLOR_MODE = `This color mode${SUFFIX}`;
+
+const MODE_REASON: Partial<Record<RenderMode, string>> = {
+  ascii: `ascii mode${SUFFIX}`,
+  symbols: `symbols mode${SUFFIX}`,
+  hybrid: `hybrid mode${SUFFIX}`
+};
+
+const ALGORITHM_REASON: Partial<Record<DitherAlgorithm, string>> = {
+  'floyd-steinberg': `floyd-steinberg${SUFFIX}`,
+  atkinson: `atkinson${SUFFIX}`,
+  stucki: `stucki${SUFFIX}`,
+  jarvis: `jarvis${SUFFIX}`
+};
+
+const COLOR_MODE_REASON: Partial<Record<AgencyDitherOptions['colorMode'], string>> = {
+  palette: `palette color mode${SUFFIX}`,
+  brightness: `brightness color mode${SUFFIX}`
+};
+
+const AMBIENT: Record<AgencyDitherOptions['ambientMode'], number> = {
+  drift: 0,
+  wave: 1,
+  orbit: 2,
+  pulse: 3,
+  // jitter needs the integer hash the shader cannot reproduce, so it stays on Canvas.
+  jitter: 0
+};
+
 const clamp = (value: number, min = 0, max = 1): number =>
   Math.min(max, Math.max(min, value));
 
@@ -287,6 +426,16 @@ interface WebGLUniforms {
   staggerFrom: WebGLUniformLocation;
   invert: WebGLUniformLocation;
   backgroundTransparent: WebGLUniformLocation;
+  neighborhood: WebGLUniformLocation;
+  rotation: WebGLUniformLocation;
+  displacement: WebGLUniformLocation;
+  displacePhase: WebGLUniformLocation;
+  ambientMode: WebGLUniformLocation;
+  ambientAmount: WebGLUniformLocation;
+  ambientFrequency: WebGLUniformLocation;
+  ambientElapsed: WebGLUniformLocation;
+  mouse: WebGLUniformLocation;
+  ripple: WebGLUniformLocation;
 }
 
 function compileShader(
@@ -406,14 +555,16 @@ export class WebGLRenderer implements DitherRenderer {
     secondary?: SourceFrame | null,
     mask?: SourceFrame | null
   ): string {
+    // Every message is interned. This runs twice per frame for each instance on
+    // the Canvas fallback, so building template strings here littered the heap.
     if (!SUPPORTED_MODES.has(options.mode)) {
-      return `${options.mode} mode requires the Canvas renderer`;
+      return MODE_REASON[options.mode] ?? UNSUPPORTED_MODE;
     }
     if (options.glyphSelection !== 'tone') {
       return 'Random glyph selection requires the Canvas renderer';
     }
     if (!(options.algorithm in ALGORITHMS)) {
-      return `${options.algorithm} requires the Canvas renderer`;
+      return ALGORITHM_REASON[options.algorithm] ?? UNSUPPORTED_ALGORITHM;
     }
     if (secondary?.ready && options.sourceMix > 0) {
       return 'Secondary-source blending requires the Canvas renderer';
@@ -421,20 +572,22 @@ export class WebGLRenderer implements DitherRenderer {
     if (mask?.ready) return 'Masks require the Canvas renderer';
     if (options.toneMap.length) return 'Tone maps require the Canvas renderer';
     if (options.colorMode !== 'monochrome' && options.colorMode !== 'source') {
-      return `${options.colorMode} color mode requires the Canvas renderer`;
+      return COLOR_MODE_REASON[options.colorMode] ?? UNSUPPORTED_COLOR_MODE;
     }
     if (options.foregroundTransparent) {
       return 'Foreground transparency requires the Canvas renderer';
     }
     if (options.blur > 0) return 'Source blur requires the Canvas renderer';
+    // Rotation, displacement, ripple, pointer push and the drift, wave, orbit
+    // and pulse ambient modes are all expressed in the shader. Only jitter,
+    // which needs the integer hash GLSL ES 1.00 cannot reproduce, still falls
+    // back to Canvas.
     if (
-      options.rotation !== 0 ||
-      options.displacement > 0 ||
-      options.rippleStrength > 0 ||
-      options.mouseInfluence > 0 ||
-      (options.ambientEnabled && options.ambientAmount > 0)
+      options.ambientEnabled &&
+      options.ambientAmount > 0 &&
+      options.ambientMode === 'jitter'
     ) {
-      return 'Canvas-native motion controls require the Canvas renderer';
+      return 'Jitter ambient motion requires the Canvas renderer';
     }
     return '';
   }
@@ -545,7 +698,17 @@ export class WebGLRenderer implements DitherRenderer {
       colorMode: getUniform(gl, this.program, 'u_colorMode'),
       staggerFrom: getUniform(gl, this.program, 'u_staggerFrom'),
       invert: getUniform(gl, this.program, 'u_invert'),
-      backgroundTransparent: getUniform(gl, this.program, 'u_backgroundTransparent')
+      backgroundTransparent: getUniform(gl, this.program, 'u_backgroundTransparent'),
+      neighborhood: getUniform(gl, this.program, 'u_neighborhood'),
+      rotation: getUniform(gl, this.program, 'u_rotation'),
+      displacement: getUniform(gl, this.program, 'u_displacement'),
+      displacePhase: getUniform(gl, this.program, 'u_displacePhase'),
+      ambientMode: getUniform(gl, this.program, 'u_ambientMode'),
+      ambientAmount: getUniform(gl, this.program, 'u_ambientAmount'),
+      ambientFrequency: getUniform(gl, this.program, 'u_ambientFrequency'),
+      ambientElapsed: getUniform(gl, this.program, 'u_ambientElapsed'),
+      mouse: getUniform(gl, this.program, 'u_mouse'),
+      ripple: getUniform(gl, this.program, 'u_ripple')
     };
 
     const buffer = gl.createBuffer();
@@ -625,7 +788,7 @@ export class WebGLRenderer implements DitherRenderer {
     source: SourceFrame,
     options: AgencyDitherOptions,
     time: number,
-    _pointer: RendererPointerState,
+    pointer: RendererPointerState,
     secondary?: SourceFrame | null,
     mask?: SourceFrame | null
   ): RenderStats {
@@ -715,6 +878,45 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1i(
       this.uniforms.backgroundTransparent,
       options.backgroundTransparent || options.transparent ? 1 : 0
+    );
+
+    // Motion. Each of these can push a primitive out of its own cell, so the
+    // neighbourhood search is only switched on when one of them is in play.
+    const ambientAmount =
+      options.ambientEnabled && options.ambientMode !== 'jitter'
+        ? options.ambientAmount
+        : 0;
+    const rippleAge = pointer.rippleStarted > 0
+      ? (time - pointer.rippleStarted) / 1000
+      : 0;
+    const rippleStrength = pointer.rippleStarted > 0 ? options.rippleStrength : 0;
+    const mouseInfluence = pointer.active ? options.mouseInfluence : 0;
+    const moves =
+      ambientAmount > 0 ||
+      options.displacement > 0 ||
+      rippleStrength > 0 ||
+      mouseInfluence > 0 ||
+      // A rotated square's corners reach beyond its own cell.
+      (options.rotation !== 0 && options.mode !== 'dots' && options.mode !== 'halftone');
+
+    gl.uniform1i(this.uniforms.neighborhood, moves ? 1 : 0);
+    gl.uniform1f(this.uniforms.rotation, options.rotation * Math.PI / 180);
+    gl.uniform1f(this.uniforms.displacement, options.displacement);
+    gl.uniform1f(this.uniforms.displacePhase, time * 0.0004);
+    gl.uniform1i(this.uniforms.ambientMode, AMBIENT[options.ambientMode] ?? 0);
+    gl.uniform1f(this.uniforms.ambientAmount, ambientAmount);
+    gl.uniform1f(
+      this.uniforms.ambientFrequency,
+      Math.max(0.001, options.ambientFrequency)
+    );
+    gl.uniform1f(this.uniforms.ambientElapsed, time * 0.001 * options.ambientSpeed);
+    gl.uniform3f(this.uniforms.mouse, pointer.x, pointer.y, mouseInfluence);
+    gl.uniform4f(
+      this.uniforms.ripple,
+      pointer.rippleX,
+      pointer.rippleY,
+      rippleStrength,
+      rippleAge
     );
 
     // The shader writes the finished pixel, alpha included, for every fragment

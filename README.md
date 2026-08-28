@@ -40,10 +40,12 @@ Production-ready today:
 Not implemented yet:
 
 - Full WebGL feature parity. The `webgl` renderer is the default and supports
-  `raw-dither`, `dots`, `blocks`, and `halftone` with realtime-safe
-  algorithms. ASCII, symbols, hybrid output, error diffusion, masks, tone
-  maps, palette modes, and Canvas-native motion automatically use the Canvas
-  renderer so the requested effect remains visually correct.
+  `raw-dither`, `dots`, `blocks`, and `halftone` with realtime-safe algorithms,
+  including rotation, displacement, click ripple, pointer push, and the drift,
+  wave, orbit and pulse ambient modes. ASCII, symbols, hybrid output, error
+  diffusion, masks, tone maps, palette modes, and jitter ambient motion
+  automatically use the Canvas renderer so the requested effect remains
+  visually correct.
 - CPU error diffusion is throttled, but not moved into a Web Worker yet; the
   `worker` flag is reserved and defaults to `false`
 - Automated browser and visual-regression tests
@@ -823,6 +825,20 @@ ratios as the signal, not the absolute values.
 
 (\*) pinned to the harness `requestAnimationFrame` ceiling, so the real WebGL
 headroom is higher than the figure shows.
+
+Motion is on the GPU too. Ambient drift, displacement and rotation used to force
+the Canvas renderer; they now run in the shader, which tests the 3×3 cell
+neighbourhood so a displaced primitive is still drawn when it spills out of its
+own cell:
+
+| Configuration (25,680 cells) | Canvas | WebGL |
+| ---------------------------- | -----: | ----: |
+| Ambient drift                |  28 fps | 179 fps |
+| Displacement                 |  28 fps | 181 fps |
+| Rotated blocks               |  15 fps | 181 fps |
+
+The neighbourhood search costs about 0.3 ms and is switched off entirely when no
+motion is active.
 
 Per-cell drawing, not sampling or dithering, is what costs. At 25,680 cells the
 whole sample-and-dither pipeline is roughly 1 ms (`raw-dither` mode, which skips

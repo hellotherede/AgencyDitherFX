@@ -104,7 +104,17 @@
         { id: 'gl-raw-dither-video',    dynamic: true,  opts: { mode: 'raw-dither', renderer: 'webgl' } },
         { id: 'gl-dots-sourcecol-video',dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', colorMode: 'source' } },
         { id: 'gl-dots-cell3-video',    dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', cellSize: 3 } },
-        { id: 'dots-cell3-video',       dynamic: true,  opts: { mode: 'dots', cellSize: 3 } }
+        { id: 'dots-cell3-video',       dynamic: true,  opts: { mode: 'dots', cellSize: 3 } },
+        // Fragment-bound stress: 9x the pixels of the dpr-1 cases. Shows how
+        // much headroom the shader has for extra per-fragment work.
+        { id: 'gl-dots-dpr3',           dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', maxDpr: 3 } },
+        { id: 'dots-dpr3',              dynamic: true,  opts: { mode: 'dots', maxDpr: 3 } },
+        // Motion configurations, which used to force the Canvas renderer.
+        { id: 'gl-ambient-video',       dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', ambientEnabled: true, ambientAmount: 0.25 } },
+        { id: 'gl-displacement-video',  dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', displacement: 0.4 } },
+        { id: 'displacement-video',     dynamic: true,  opts: { mode: 'dots', displacement: 0.4 } },
+        { id: 'gl-rotation-video',      dynamic: true,  opts: { mode: 'blocks', renderer: 'webgl', rotation: 30 } },
+        { id: 'rotation-video',         dynamic: true,  opts: { mode: 'blocks', rotation: 30 } }
       ];
 
       const median = (a) => {
@@ -396,7 +406,14 @@
           { id: 'raw-noise',      opts: { mode: 'raw-dither' } },
           { id: 'smooth-raw-noise', smooth: true, opts: { mode: 'raw-dither' } },
           { id: 'dots-flat',      opts: { mode: 'dots', noiseAmount: 0, contrast: 1, ditherAmount: 1 } },
-          { id: 'dots-reveal-50', opts: { mode: 'dots', noiseAmount: 0, revealProgress: 0.5 } }
+          { id: 'dots-reveal-50', opts: { mode: 'dots', noiseAmount: 0, revealProgress: 0.5 } },
+          // Motion paths, newly expressible in the shader.
+          { id: 'ambient-drift',   opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientAmount: 0.25 } },
+          { id: 'ambient-orbit',   opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'orbit', ambientAmount: 0.3 } },
+          { id: 'ambient-pulse',   opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'pulse', ambientAmount: 0.4 } },
+          { id: 'ambient-wave',    opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'wave', ambientAmount: 0.3 } },
+          { id: 'displacement',    opts: { mode: 'dots', noiseAmount: 0, displacement: 0.4 } },
+          { id: 'rotation-blocks', opts: { mode: 'blocks', noiseAmount: 0, rotation: 30 } }
         ];
         const out = [];
         for (const cfg of CONFIGS) {
