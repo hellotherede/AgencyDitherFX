@@ -140,7 +140,11 @@
         { id: 'gl-mask-video',          dynamic: true,  mask: true, opts: { mode: 'dots', renderer: 'webgl' } },
         { id: 'mask-video',             dynamic: true,  mask: true, opts: { mode: 'dots' } },
         { id: 'gl-mix-video',           dynamic: true,  secondary: true, opts: { mode: 'dots', renderer: 'webgl', sourceMix: 0.5 } },
-        { id: 'mix-video',              dynamic: true,  secondary: true, opts: { mode: 'dots', sourceMix: 0.5 } }
+        { id: 'mix-video',              dynamic: true,  secondary: true, opts: { mode: 'dots', sourceMix: 0.5 } },
+        // The real-world case: animated ASCII on a page that is also animating.
+        { id: 'ascii-ambient',          dynamic: false, opts: { mode: 'ascii', renderer: 'webgl', ambientEnabled: true, ambientAmount: 0.25 } },
+        { id: 'ascii-drift-video',      dynamic: true,  opts: { mode: 'ascii', renderer: 'webgl', ambientEnabled: true, ambientAmount: 0.25 } },
+        { id: 'ascii-scramble',         dynamic: false, opts: { mode: 'ascii', renderer: 'webgl', glyphScramble: 0.3 } }
       ];
 
       const median = (a) => {
