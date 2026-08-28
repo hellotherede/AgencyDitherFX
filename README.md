@@ -39,7 +39,7 @@ Production-ready today:
 
 Not implemented yet:
 
-- Full WebGL feature parity. The experimental `webgl` renderer supports
+- Full WebGL feature parity. The `webgl` renderer is the default and supports
   `raw-dither`, `dots`, `blocks`, and `halftone` with realtime-safe
   algorithms. ASCII, symbols, hybrid output, error diffusion, masks, tone
   maps, palette modes, and Canvas-native motion automatically use the Canvas
@@ -758,9 +758,11 @@ Built-in safeguards:
 - SSR package-import and GSAP callback regression tests
 - ResizeObserver instead of frame-by-frame layout reads
 - Reduced-motion handling
-- Full listener, observer, media, scheduler, and GSAP tween cleanup
+- Full listener, observer, media, scheduler, timer, and GSAP tween cleanup
 - Static WebGL sources uploaded once instead of per frame
-- WebGL context budget so extra instances fall back instead of evicting
+- Lazy WebGL context acquisition with a budget and automatic retry
+- Render events dispatched only when a listener is registered
+- Manual suspend/resume for tabs and carousels
 
 Recommended starting budgets:
 
@@ -778,6 +780,33 @@ atlas before they get the same benefit. Requesting `webgl` with one of those
 features transparently falls back to Canvas and reports the reason through
 `warning`; returning to a compatible configuration restores WebGL
 automatically.
+
+### Choosing a renderer
+
+`renderer` defaults to `'webgl'`. Configurations the shader cannot express fall
+back to Canvas on their own and explain themselves through `warning`, so the
+default is safe for every mode — ASCII, symbols, tone maps, masks, palette
+colour and error diffusion simply keep running on Canvas as before.
+
+The two renderers are close but not identical, because Canvas rasterises
+antialiased primitives while the shader computes coverage analytically, and
+because Canvas area-averages the source during downscaling while the shader
+samples each cell centre. Measured on the configurations below:
+
+| Agreement                 | dots / blocks | raw-dither |
+| ------------------------- | ------------: | ---------: |
+| Mean luminance delta      |    ~6.5 / 255 |  ~2.4 / 255 |
+| Pixels differing by > 64  |         ~0.6% |       ~1.0% |
+
+Nearly all of the difference is a fraction of a pixel at primitive edges. Cells
+that actually disagree — one renderer drawing ink where the other draws
+background — are well under 1%. Tone response, Bayer matrices, and the noise
+field are identical by construction: the noise is baked on the CPU with the same
+hash the Canvas renderer uses and uploaded as a texture, because GLSL ES 1.00
+has no bitwise operators to reproduce it.
+
+Pass `renderer: 'canvas'` when byte-exact stability across releases matters more
+than frame rate.
 
 ### Measured renderer cost
 
@@ -820,6 +849,19 @@ built from many instances. `WebGLRenderer.maxContexts` (default `8`) caps how
 many instances take a GPU context; beyond it, new instances fall back to Canvas
 rather than evicting each other. Raise it only if you know the page's instance
 count stays well under the browser limit.
+
+Contexts are acquired lazily, so the budget tracks how many effects are
+*running*, not how many exist:
+
+- Constructing an instance takes no GPU context. Instances start on Canvas.
+- Activation (entering the viewport, or `immediate: true`) upgrades to WebGL.
+- Going inactive hands the slot back after a two-second grace period, so
+  scrolling a section out and back does not rebuild the shader program.
+- An instance that lost the race and fell back to Canvas retries automatically
+  the next time any other instance releases a slot.
+
+A page with eight sections and one visible therefore uses one context, not
+eight.
 
 Monitor `agencydither:render` or use `getStats()`:
 
@@ -916,6 +958,53 @@ Core Web Vitals guidance:
 - The shared scheduler and owned videos suspend while the document is hidden.
 - Use the render timing fields to identify whether sampling, dithering, or
   primitive drawing is consuming the frame budget.
+
+## Tabs, carousels, and manual suspension
+
+`IntersectionObserver` reports geometry, not visibility. A tab panel hidden with
+`opacity: 0`, `visibility: hidden`, or an off-screen transform still intersects
+the viewport, so the instance keeps rendering an effect nobody can see. Tell it
+explicitly:
+
+```ts
+function showPanel(next) {
+	panels.forEach((panel, index) => {
+		panel.classList.toggle('is-active', index === next);
+		if (index === next) panel.fx.resume();
+		else panel.fx.suspend();
+	});
+}
+```
+
+`suspend()` stops the scheduler, pauses the primary, secondary, and mask videos,
+and lets the WebGL context slot return to the budget. `resume()` restores
+whichever of those the instance's own visibility state allows — a suspended
+instance that is also off-screen stays idle until both conditions clear. Both
+calls are idempotent and safe after `destroy()`. Read `fx.isSuspended` for the
+current state.
+
+## Render events
+
+Per-frame `agencydither:render` events are dispatched only while something is
+listening, because constructing a DOM event every frame is a measurable share of
+a 0.2 ms WebGL frame. `onRender()` registers and counts the subscription for
+you:
+
+```ts
+const stop = fx.onRender(event => console.log(event.detail.fps));
+stop();
+```
+
+If you attach the listener yourself with `addEventListener`, opt the instance in
+so it knows to emit:
+
+```ts
+fx.element.addEventListener('agencydither:render', handler);
+fx.emitRenderEvents();
+
+// later
+fx.emitRenderEvents(false);
+```
 
 ## Cleanup
 
