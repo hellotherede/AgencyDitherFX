@@ -415,7 +415,11 @@
           { id: 'ambient-wave',    opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'wave', ambientAmount: 0.3 } },
           { id: 'displacement',    opts: { mode: 'dots', noiseAmount: 0, displacement: 0.4 } },
           { id: 'rotation-blocks', opts: { mode: 'blocks', noiseAmount: 0, rotation: 30 } },
-          { id: 'ascii',           opts: { mode: 'ascii', noiseAmount: 0 } }
+          { id: 'ascii',           opts: { mode: 'ascii', noiseAmount: 0 } },
+          // Canvas only eases revealProgress when stagger is on.
+          { id: 'reveal-nostagger', opts: { mode: 'dots', noiseAmount: 0, stagger: false, revealProgress: 0.5 } },
+          // dotScale over 1 pushes dots past their own cell.
+          { id: 'dotscale-big',     opts: { mode: 'dots', noiseAmount: 0, dotScale: 1.3 } }
         ];
         const out = [];
         for (const cfg of CONFIGS) {

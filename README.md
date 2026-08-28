@@ -887,7 +887,8 @@ Contexts are acquired lazily, so the budget tracks how many effects are
 A page with eight sections and one visible therefore uses one context, not
 eight.
 
-Monitor `agencydither:render` or use `getStats()`:
+Subscribe with `onRender()`, or use `getStats()`. Attaching the listener
+yourself also needs `emitRenderEvents()` — see [Render events](#render-events):
 
 ```ts
 fx.onRender((event) => {

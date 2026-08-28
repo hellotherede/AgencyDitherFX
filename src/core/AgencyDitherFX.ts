@@ -140,6 +140,11 @@ export class AgencyDitherFX {
     if (!(element instanceof HTMLCanvasElement)) element.append(this.canvas);
     this.params = this.mergeOptions(DEFAULT_OPTIONS, options);
     this.pendingInitialSource = this.params.source ?? null;
+    // A canvas keeps whichever context type it is first given, and a caller's
+    // own <canvas> cannot be swapped out. Deferring acquisition there would
+    // claim a 2D context and lock WebGL out for good, so those targets decide
+    // up front and keep the context for the instance's lifetime.
+    if (element instanceof HTMLCanvasElement) this.gpuAllowed = true;
     const initialRenderer = this.selectedRendererKind();
     this.renderer = this.createRenderer(this.canvas, initialRenderer);
     this.rendererSelection = `${this.params.renderer}:${initialRenderer}`;
@@ -381,13 +386,11 @@ export class AgencyDitherFX {
       ...gsapVars,
       onUpdate: () => {
         this.requestRender();
-        const callback = gsapVars.onUpdate;
-        if (typeof callback === 'function') callback();
+        this.invokeGsapCallback(gsapVars, 'onUpdate');
       },
       onComplete: () => {
         this.releaseTween(handle);
-        const callback = gsapVars.onComplete;
-        if (typeof callback === 'function') callback();
+        this.invokeGsapCallback(gsapVars, 'onComplete');
       }
     });
     handle = tween as TrackedTween;
@@ -405,13 +408,11 @@ export class AgencyDitherFX {
       ...gsapVars,
       onUpdate: () => {
         this.requestRender();
-        const callback = gsapVars.onUpdate;
-        if (typeof callback === 'function') callback();
+        this.invokeGsapCallback(gsapVars, 'onUpdate');
       },
       onComplete: () => {
         this.releaseTween(handle);
-        const callback = gsapVars.onComplete;
-        if (typeof callback === 'function') callback();
+        this.invokeGsapCallback(gsapVars, 'onComplete');
       }
     });
     handle = tween as TrackedTween;
@@ -498,6 +499,23 @@ export class AgencyDitherFX {
     this.canvas.removeEventListener('pointerdown', this.onClick);
     this.canvas.removeEventListener('agencydither:webglrestored', this.onWebGLRestored);
     if (!(this.element instanceof HTMLCanvasElement)) this.canvas.remove();
+  }
+
+  /**
+   * Invokes a caller-supplied GSAP callback with the scope and parameters GSAP
+   * itself would have used, which wrapping the callback would otherwise drop.
+   */
+  private invokeGsapCallback(
+    gsapVars: Record<string, unknown>,
+    name: 'onUpdate' | 'onComplete'
+  ): void {
+    const callback = gsapVars[name];
+    if (typeof callback !== 'function') return;
+    const params = gsapVars[`${name}Params`];
+    callback.apply(
+      gsapVars.callbackScope,
+      Array.isArray(params) ? params : []
+    );
   }
 
   /** Retains any tween that exposes kill() so destroy() can release it. */
@@ -593,6 +611,8 @@ export class AgencyDitherFX {
 
   /** Hands the WebGL slot back after a grace period of continuous inactivity. */
   private scheduleGpuRelease(): void {
+    // A caller's own <canvas> cannot be swapped, so its context is permanent.
+    if (this.element instanceof HTMLCanvasElement) return;
     if (!this.gpuAllowed || this.gpuReleaseTimer !== null) return;
     this.gpuReleaseTimer = setTimeout(() => {
       this.gpuReleaseTimer = null;
@@ -600,7 +620,12 @@ export class AgencyDitherFX {
       this.gpuAllowed = false;
       const previous = this.renderer;
       this.ensureRenderer();
-      if (previous !== this.renderer) this.resize();
+      if (previous === this.renderer) return;
+      // The swap installs a blank canvas. An instance can be inactive while
+      // still on screen — suspended by a tab, or inside the observer's root
+      // margin — so the frame has to be repainted rather than left empty.
+      this.resize();
+      this.render();
     }, GPU_RELEASE_DELAY_MS);
   }
 
@@ -667,8 +692,12 @@ export class AgencyDitherFX {
   private swapCanvas(): HTMLCanvasElement {
     if (this.element instanceof HTMLCanvasElement) return this.canvas;
     const next = Object.assign(document.createElement('canvas'), {
-      className: this.canvas.className
+      className: this.canvas.className,
+      id: this.canvas.id
     });
+    // Inline styles are load-bearing here: resize() writes the CSS size onto
+    // the element, and callers may have set their own.
+    next.style.cssText = this.canvas.style.cssText;
     const role = this.canvas.getAttribute('role');
     if (role) next.setAttribute('role', role);
     if (this.canvas.getAttribute('aria-hidden') === 'true') {

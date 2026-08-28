@@ -114,6 +114,19 @@ test('constructor sources wait for viewport activation', () => {
   );
   diffusionFx.destroy();
 
+  // A caller's own <canvas> cannot be swapped for a fresh one, so deferring
+  // acquisition there would claim a 2D context and lock WebGL out permanently.
+  // Those targets must decide at construction instead.
+  const canvasBaseline = webglRequests;
+  const ownCanvas = new FakeCanvas();
+  const canvasFx = new AgencyDitherFX(ownCanvas, { renderer: 'webgl', mode: 'dots' });
+  assert.equal(
+    webglRequests,
+    canvasBaseline + 1,
+    'a canvas target must try WebGL before a 2D context is claimed'
+  );
+  canvasFx.destroy();
+
   // A WebGL context is only taken once an instance is actually running, so an
   // off-screen section must not consume a slot just by being constructed.
   const before = webglRequests;

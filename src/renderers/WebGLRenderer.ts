@@ -33,6 +33,7 @@ uniform sampler2D u_noise;
 uniform sampler2D u_glyphAtlas;
 uniform float u_glyphCount;
 uniform vec2 u_glyphTile;
+uniform bool u_glyphReady;
 uniform vec2 u_cssSize;
 uniform vec2 u_gridSize;
 uniform vec4 u_drawRect;
@@ -47,6 +48,7 @@ uniform float u_noiseAmount;
 uniform float u_dotScale;
 uniform float u_revealProgress;
 uniform float u_staggerAmount;
+uniform bool u_stagger;
 uniform vec4 u_foreground;
 uniform vec4 u_background;
 uniform int u_mode;
@@ -125,6 +127,8 @@ float revealForCell(vec2 cell) {
   float progress = clamp(u_revealProgress, 0.0, 1.0);
   if (progress >= 1.0) return progress;
   if (progress <= 0.0) return 0.0;
+
+  if (!u_stagger) return progress;
 
   vec2 denom = max(u_gridSize - 1.0, vec2(1.0));
   vec2 n = cell / denom;
@@ -259,6 +263,7 @@ float primitiveCoverage(vec2 cell, vec2 css, out vec3 rgb, out float outReveal) 
   }
 
   if (u_mode == 4) {
+    if (!u_glyphReady) return 0.0;
     // Glyphs are drawn at a fixed size; the Canvas renderer does not scale them
     // by tone, it only picks a different character.
     vec2 uv = delta / u_glyphTile + 0.5;
@@ -370,9 +375,10 @@ const STAGGER: Record<AgencyDitherOptions['staggerFrom'], number> = {
   random: 12
 };
 
-// Atlas tiles are rendered above device resolution so the bilinear fetch
-// averages several samples, which lands closer to Canvas's own antialiasing.
-const GLYPH_SUPERSAMPLE = 2;
+// Atlas tiles are rasterised at device resolution. Supersampling was measured
+// at 2x and 3x: both widened the gap with Canvas rather than closing it,
+// because a bilinear fetch only reads four texels and undersamples past 2x.
+const GLYPH_SUPERSAMPLE = 1;
 
 const SUFFIX = ' requires the Canvas renderer';
 const UNSUPPORTED_MODE = `This mode${SUFFIX}`;
@@ -426,6 +432,8 @@ interface WebGLUniforms {
   glyphAtlas: WebGLUniformLocation;
   glyphCount: WebGLUniformLocation;
   glyphTile: WebGLUniformLocation;
+  glyphReady: WebGLUniformLocation;
+  stagger: WebGLUniformLocation;
   cssSize: WebGLUniformLocation;
   gridSize: WebGLUniformLocation;
   drawRect: WebGLUniformLocation;
@@ -680,6 +688,7 @@ export class WebGLRenderer implements DitherRenderer {
       // Shader, program, buffer or texture creation can fail after the context
       // exists. Give the budget slot back rather than leaking it forever.
       liveContexts = Math.max(0, liveContexts - 1);
+      budgetGeneration += 1;
       gl.getExtension('WEBGL_lose_context')?.loseContext();
       throw error;
     }
@@ -717,6 +726,8 @@ export class WebGLRenderer implements DitherRenderer {
       glyphAtlas: getUniform(gl, this.program, 'u_glyphAtlas'),
       glyphCount: getUniform(gl, this.program, 'u_glyphCount'),
       glyphTile: getUniform(gl, this.program, 'u_glyphTile'),
+      glyphReady: getUniform(gl, this.program, 'u_glyphReady'),
+      stagger: getUniform(gl, this.program, 'u_stagger'),
       cssSize: getUniform(gl, this.program, 'u_cssSize'),
       gridSize: getUniform(gl, this.program, 'u_gridSize'),
       drawRect: getUniform(gl, this.program, 'u_drawRect'),
@@ -892,6 +903,7 @@ export class WebGLRenderer implements DitherRenderer {
     }
     gl.uniform1f(this.uniforms.glyphCount, this.glyphCount);
     gl.uniform2f(this.uniforms.glyphTile, this.glyphTileCss, this.glyphTileCss);
+    gl.uniform1i(this.uniforms.glyphReady, this.glyphReady ? 1 : 0);
 
     const [drawX, drawY, drawWidth, drawHeight] = this.drawRect(source, options);
     const foreground = rgba(options.foreground);
@@ -920,7 +932,8 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1f(this.uniforms.noiseAmount, options.noiseAmount);
     gl.uniform1f(this.uniforms.dotScale, options.dotScale);
     gl.uniform1f(this.uniforms.revealProgress, options.revealProgress);
-    gl.uniform1f(this.uniforms.staggerAmount, options.stagger ? options.staggerAmount : 0);
+    gl.uniform1f(this.uniforms.staggerAmount, options.staggerAmount);
+    gl.uniform1i(this.uniforms.stagger, options.stagger ? 1 : 0);
     gl.uniform4f(this.uniforms.foreground, ...foreground);
     gl.uniform4f(this.uniforms.background, ...background);
     gl.uniform1i(this.uniforms.mode, mode);
@@ -953,7 +966,9 @@ export class WebGLRenderer implements DitherRenderer {
       (options.rotation !== 0 && options.mode !== 'dots' && options.mode !== 'halftone') ||
       // Glyphs are drawn from the cell centre at roughly cell size and routinely
       // overhang their neighbours.
-      options.mode === 'ascii';
+      options.mode === 'ascii' ||
+      // dotScale above 1 pushes the circle past its own cell.
+      (options.dotScale > 1 && (options.mode === 'dots' || options.mode === 'halftone'));
 
     gl.uniform1i(this.uniforms.neighborhood, moves ? 1 : 0);
     gl.uniform1f(this.uniforms.rotation, options.rotation * Math.PI / 180);
@@ -1088,7 +1103,11 @@ export class WebGLRenderer implements DitherRenderer {
     const ctx = atlas.getContext('2d');
     if (!ctx) return false;
     ctx.clearRect(0, 0, atlas.width, atlas.height);
-    ctx.font = `${options.fontWeight} ${fontSize * pixelScale}px ${options.fontFamily}`;
+    // The tile is rasterised at GLYPH_SUPERSAMPLE times device resolution, so
+    // the font has to be scaled by the same factor or the glyph comes out
+    // smaller than the Canvas renderer draws it.
+    ctx.font =
+      `${options.fontWeight} ${fontSize * pixelScale * GLYPH_SUPERSAMPLE}px ${options.fontFamily}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#ffffff';
