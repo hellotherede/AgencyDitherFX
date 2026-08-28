@@ -1,6 +1,6 @@
 {
   "name": "agency-dither-fx",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Production-grade Canvas dither, halftone, ASCII and SVG-symbol effects.",
   "keywords": [
     "ascii-art",
@@ -29,7 +29,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "dev": "vite",

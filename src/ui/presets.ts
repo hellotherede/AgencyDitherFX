@@ -75,7 +75,6 @@ export const presets: Record<string, Preset> = {
   'binary-signal-mask': {
     name: 'Binary Signal Mask',
     mode: 'ascii',
-    renderer: 'canvas',
     algorithm: 'threshold',
     fit: 'cover',
     cellSize: 14,

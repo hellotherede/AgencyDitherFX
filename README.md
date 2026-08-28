@@ -39,15 +39,23 @@ Production-ready today:
 
 Not implemented yet:
 
-- Full WebGL feature parity. The experimental `webgl` renderer supports
-  `raw-dither`, `dots`, `blocks`, and `halftone` with realtime-safe
-  algorithms. ASCII, symbols, hybrid output, error diffusion, masks, tone
-  maps, palette modes, and Canvas-native motion automatically use the Canvas
-  renderer so the requested effect remains visually correct.
+- Full WebGL feature parity. The `webgl` renderer is the default and covers
+  every mode, every colour mode, every realtime-safe algorithm, every motion
+  control, luminance masks, secondary-source blending, tone maps with per-band
+  symbols, glyph scramble and random glyph selection. What still selects Canvas
+  automatically, reporting the reason through `warning`:
+
+  | Feature                  | Why |
+  | ------------------------ | --- |
+  | Error diffusion          | Each pixel depends on its predecessors, which a fragment shader cannot express |
+  | Source blur              | Needs a separate blur pass |
+  | Per-band glyphs          | An arbitrary character is not in the ramp atlas |
+  | Tone maps over 7 bands   | The band uniform arrays hold seven |
+  | Palettes over 16 colours | The palette texture is 16 wide |
+  | Glyph ramps over 255     | The scramble channel is one byte |
 - CPU error diffusion is throttled, but not moved into a Web Worker yet; the
   `worker` flag is reserved and defaults to `false`
 - Automated browser and visual-regression tests
-- GPU glyph atlases for very dense full-screen ASCII video
 
 Those are meaningful next steps for shader-heavy installations, but they are
 not required for ordinary hero sections, cards, editorial modules, or
@@ -758,9 +766,11 @@ Built-in safeguards:
 - SSR package-import and GSAP callback regression tests
 - ResizeObserver instead of frame-by-frame layout reads
 - Reduced-motion handling
-- Full listener, observer, media, scheduler, and GSAP tween cleanup
+- Full listener, observer, media, scheduler, timer, and GSAP tween cleanup
 - Static WebGL sources uploaded once instead of per frame
-- WebGL context budget so extra instances fall back instead of evicting
+- Lazy WebGL context acquisition with a budget and automatic retry
+- Render events dispatched only when a listener is registered
+- Manual suspend/resume for tabs and carousels
 
 Recommended starting budgets:
 
@@ -779,6 +789,33 @@ features transparently falls back to Canvas and reports the reason through
 `warning`; returning to a compatible configuration restores WebGL
 automatically.
 
+### Choosing a renderer
+
+`renderer` defaults to `'webgl'`. Configurations the shader cannot express fall
+back to Canvas on their own and explain themselves through `warning`, so the
+default is safe for every mode — ASCII, symbols, tone maps, masks, palette
+colour and error diffusion simply keep running on Canvas as before.
+
+The two renderers are close but not identical, because Canvas rasterises
+antialiased primitives while the shader computes coverage analytically, and
+because Canvas area-averages the source during downscaling while the shader
+samples each cell centre. Measured on the configurations below:
+
+| Agreement                 | dots / blocks | raw-dither |
+| ------------------------- | ------------: | ---------: |
+| Mean luminance delta      |    ~6.5 / 255 |  ~2.4 / 255 |
+| Pixels differing by > 64  |         ~0.6% |       ~1.0% |
+
+Nearly all of the difference is a fraction of a pixel at primitive edges. Cells
+that actually disagree — one renderer drawing ink where the other draws
+background — are well under 1%. Tone response, Bayer matrices, and the noise
+field are identical by construction: the noise is baked on the CPU with the same
+hash the Canvas renderer uses and uploaded as a texture, because GLSL ES 1.00
+has no bitwise operators to reproduce it.
+
+Pass `renderer: 'canvas'` when byte-exact stability across releases matters more
+than frame rate.
+
 ### Measured renderer cost
 
 `npm run bench` drives both renderers through a real Chrome and reports the
@@ -794,6 +831,36 @@ ratios as the signal, not the absolute values.
 
 (\*) pinned to the harness `requestAnimationFrame` ceiling, so the real WebGL
 headroom is higher than the figure shows.
+
+Motion is on the GPU too. Ambient drift, displacement and rotation used to force
+the Canvas renderer; they now run in the shader, which tests the 3×3 cell
+neighbourhood so a displaced primitive is still drawn when it spills out of its
+own cell:
+
+| Configuration (25,680 cells) | Canvas | WebGL |
+| ---------------------------- | -----: | ----: |
+| Ambient drift                |  28 fps | 179 fps |
+| Displacement                 |  28 fps | 181 fps |
+| Rotated blocks               |  15 fps | 181 fps |
+| ASCII                        |  24 fps | 181 fps |
+| Hybrid                       |  34 fps | 181 fps |
+| Nearest-palette colour       |  25 fps | 181 fps |
+| Luminance mask               |  32 fps | 181 fps |
+| Two-source blend             |  39 fps | 181 fps |
+| Glyph scramble               |  48 fps | 181 fps |
+| SVG symbols                  | 3.4 fps | 181 fps |
+| Tone-mapped symbols          | 4.6 fps | 181 fps |
+| Tone-mapped symbols          | 4.6 fps | 181 fps |
+
+The neighbourhood search costs about 0.3 ms and is switched off entirely when no
+motion is active.
+
+ASCII renders the glyph ramp once into a strip of tiles at twice device
+resolution and samples it per fragment, which is what `fillText` per cell cost
+21 ms to do. Glyph selection matches the Canvas renderer exactly; the remaining
+difference is edge antialiasing, since Canvas hints and positions each glyph
+individually. `glyphSelection: 'random'` and `glyphScramble` still fall back,
+because both need the integer hash the shader cannot reproduce.
 
 Per-cell drawing, not sampling or dithering, is what costs. At 25,680 cells the
 whole sample-and-dither pipeline is roughly 1 ms (`raw-dither` mode, which skips
@@ -812,6 +879,27 @@ measuring — do not reintroduce them:
   ~3× slower than `fillText`, which already goes through Skia's own internal GPU
   glyph atlas.
 
+### Shader precision
+
+Desktop drivers quietly promote `mediump` to 32-bit floats — this machine's
+reports 23 bits of mantissa for both `mediump` and `highp` — so precision
+problems are invisible during development and only appear on phones, where
+`mediump` is a real 16-bit float exact only to 2048.
+
+The shader asks for `highp` where `GL_FRAGMENT_PRECISION_HIGH` is defined, which
+covers every WebGL-capable GPU of the last decade, and falls back to `mediump`
+otherwise. Two things are also restructured so they hold up either way:
+
+- The stagger order is built from two pre-scaled terms rather than by forming a
+  cell index and dividing, which at 100,000 cells produced an intermediate far
+  outside 16-bit range and stepped the reveal.
+- Every phase fed to `sin` or `cos` is reduced to one turn on the CPU before
+  upload, per band where each band has its own speed. Elapsed time otherwise
+  grows without bound and costs precision on any hardware in a long session.
+
+Very wide canvases still need `highp`: a coordinate past 2048 cannot be
+represented exactly in a 16-bit float, so cells would land on the wrong pixel.
+
 ### WebGL context budget
 
 Browsers drop the oldest live WebGL context once a page exceeds their limit
@@ -821,7 +909,21 @@ many instances take a GPU context; beyond it, new instances fall back to Canvas
 rather than evicting each other. Raise it only if you know the page's instance
 count stays well under the browser limit.
 
-Monitor `agencydither:render` or use `getStats()`:
+Contexts are acquired lazily, so the budget tracks how many effects are
+*running*, not how many exist:
+
+- Constructing an instance takes no GPU context. Instances start on Canvas.
+- Activation (entering the viewport, or `immediate: true`) upgrades to WebGL.
+- Going inactive hands the slot back after a two-second grace period, so
+  scrolling a section out and back does not rebuild the shader program.
+- An instance that lost the race and fell back to Canvas retries automatically
+  the next time any other instance releases a slot.
+
+A page with eight sections and one visible therefore uses one context, not
+eight.
+
+Subscribe with `onRender()`, or use `getStats()`. Attaching the listener
+yourself also needs `emitRenderEvents()` — see [Render events](#render-events):
 
 ```ts
 fx.onRender((event) => {
@@ -916,6 +1018,53 @@ Core Web Vitals guidance:
 - The shared scheduler and owned videos suspend while the document is hidden.
 - Use the render timing fields to identify whether sampling, dithering, or
   primitive drawing is consuming the frame budget.
+
+## Tabs, carousels, and manual suspension
+
+`IntersectionObserver` reports geometry, not visibility. A tab panel hidden with
+`opacity: 0`, `visibility: hidden`, or an off-screen transform still intersects
+the viewport, so the instance keeps rendering an effect nobody can see. Tell it
+explicitly:
+
+```ts
+function showPanel(next) {
+	panels.forEach((panel, index) => {
+		panel.classList.toggle('is-active', index === next);
+		if (index === next) panel.fx.resume();
+		else panel.fx.suspend();
+	});
+}
+```
+
+`suspend()` stops the scheduler, pauses the primary, secondary, and mask videos,
+and lets the WebGL context slot return to the budget. `resume()` restores
+whichever of those the instance's own visibility state allows — a suspended
+instance that is also off-screen stays idle until both conditions clear. Both
+calls are idempotent and safe after `destroy()`. Read `fx.isSuspended` for the
+current state.
+
+## Render events
+
+Per-frame `agencydither:render` events are dispatched only while something is
+listening, because constructing a DOM event every frame is a measurable share of
+a 0.2 ms WebGL frame. `onRender()` registers and counts the subscription for
+you:
+
+```ts
+const stop = fx.onRender(event => console.log(event.detail.fps));
+stop();
+```
+
+If you attach the listener yourself with `addEventListener`, opt the instance in
+so it knows to emit:
+
+```ts
+fx.element.addEventListener('agencydither:render', handler);
+fx.emitRenderEvents();
+
+// later
+fx.emitRenderEvents(false);
+```
 
 ## Cleanup
 

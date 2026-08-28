@@ -71,6 +71,9 @@ test('constructor sources wait for viewport activation', () => {
     addEventListener() {},
     removeEventListener() {}
   };
+  globalThis.requestAnimationFrame = fn => setTimeout(() => fn(0), 1_000_000);
+  globalThis.cancelAnimationFrame = id => clearTimeout(id);
+  globalThis.performance ??= { now: () => 0 };
   globalThis.ResizeObserver = class {
     observe() {}
     disconnect() {}
@@ -89,12 +92,58 @@ test('constructor sources wait for viewport activation', () => {
   assert.equal(imageRequests, 1);
   fx.destroy();
 
-  const asciiFx = new AgencyDitherFX(new FakeElement(), {
+  // WebGL is the default renderer, so count requests relative to a baseline
+  // rather than from zero. Error diffusion is sequential and cannot be
+  // expressed in a fragment shader, so it still selects Canvas outright.
+  const diffusionBaseline = webglRequests;
+  const diffusionFx = new AgencyDitherFX(new FakeElement(), {
     renderer: 'webgl',
-    mode: 'ascii'
+    algorithm: 'floyd-steinberg',
+    immediate: true
   });
-  assert.equal(webglRequests, 0, 'ASCII should select Canvas without trying WebGL');
-  asciiFx.set({ mode: 'dots' });
-  assert.equal(webglRequests, 1, 'compatible settings should try WebGL again');
-  asciiFx.destroy();
+  assert.equal(
+    webglRequests,
+    diffusionBaseline,
+    'error diffusion should select Canvas without trying WebGL'
+  );
+  diffusionFx.set({ algorithm: 'bayer8' });
+  assert.equal(
+    webglRequests,
+    diffusionBaseline + 1,
+    'compatible settings should try WebGL again'
+  );
+  diffusionFx.destroy();
+
+  // A caller's own <canvas> cannot be swapped for a fresh one, so deferring
+  // acquisition there would claim a 2D context and lock WebGL out permanently.
+  // Those targets must decide at construction instead.
+  const canvasBaseline = webglRequests;
+  const ownCanvas = new FakeCanvas();
+  const canvasFx = new AgencyDitherFX(ownCanvas, { renderer: 'webgl', mode: 'dots' });
+  assert.equal(
+    webglRequests,
+    canvasBaseline + 1,
+    'a canvas target must try WebGL before a 2D context is claimed'
+  );
+  canvasFx.destroy();
+
+  // A WebGL context is only taken once an instance is actually running, so an
+  // off-screen section must not consume a slot just by being constructed.
+  const before = webglRequests;
+  const deferred = new AgencyDitherFX(new FakeElement(), {
+    renderer: 'webgl',
+    mode: 'dots'
+  });
+  assert.equal(
+    webglRequests,
+    before,
+    'an inactive instance must not acquire a WebGL context'
+  );
+  intersectionCallback([{ isIntersecting: true }]);
+  assert.equal(
+    webglRequests,
+    before + 1,
+    'activation is what acquires the WebGL context'
+  );
+  deferred.destroy();
 });

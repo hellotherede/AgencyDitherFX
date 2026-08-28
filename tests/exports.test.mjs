@@ -30,7 +30,8 @@ test('every published package entry exists after the library build', async () =>
 });
 
 test('package import is SSR-safe and exposes expected defaults', () => {
-  assert.equal(DEFAULT_OPTIONS.renderer, 'canvas');
+  // GPU by default; unsupported configurations fall back to Canvas at runtime.
+  assert.equal(DEFAULT_OPTIONS.renderer, 'webgl');
   assert.equal(DEFAULT_OPTIONS.worker, false);
   assert.equal(DEFAULT_OPTIONS.glyphSelection, 'tone');
   assert.equal(DEFAULT_OPTIONS.glyphSeed, 1);

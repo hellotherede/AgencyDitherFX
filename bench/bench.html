@@ -41,6 +41,48 @@
         return c;
       }
 
+      function makeSmooth(w, h) {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        const grad = ctx.createLinearGradient(0, 0, w, h);
+        grad.addColorStop(0, '#000000');
+        grad.addColorStop(1, '#ffffff');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+        return c;
+      }
+      const SMOOTH_SOURCE = await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.src = makeSmooth(960, 540).toDataURL('image/png');
+      });
+
+      function makeMask(w, h) {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, w, h);
+        const g = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w * 0.45);
+        g.addColorStop(0, '#ffffff');
+        g.addColorStop(1, '#000000');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+        return c;
+      }
+      const MASK_SOURCE = await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.src = makeMask(960, 540).toDataURL('image/png');
+      });
+
+      // A registered SVG symbol, exercising both alpha and its own colours.
+      const SYMBOL_SVG =
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' +
+        '<polygon fill="#ef5a37" points="12,2 15,9 22,9 16.5,13.5 18.5,21 ' +
+        '12,16.5 5.5,21 7.5,13.5 2,9 9,9"/></svg>';
+
       const PATTERN = makePattern(960, 540);
       const STATIC_SOURCE = await new Promise((resolve) => {
         const img = new Image();
@@ -87,7 +129,38 @@
         { id: 'gl-raw-dither-video',    dynamic: true,  opts: { mode: 'raw-dither', renderer: 'webgl' } },
         { id: 'gl-dots-sourcecol-video',dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', colorMode: 'source' } },
         { id: 'gl-dots-cell3-video',    dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', cellSize: 3 } },
-        { id: 'dots-cell3-video',       dynamic: true,  opts: { mode: 'dots', cellSize: 3 } }
+        { id: 'dots-cell3-video',       dynamic: true,  opts: { mode: 'dots', cellSize: 3 } },
+        // Fragment-bound stress: 9x the pixels of the dpr-1 cases. Shows how
+        // much headroom the shader has for extra per-fragment work.
+        { id: 'gl-dots-dpr3',           dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', maxDpr: 3 } },
+        { id: 'dots-dpr3',              dynamic: true,  opts: { mode: 'dots', maxDpr: 3 } },
+        // Motion configurations, which used to force the Canvas renderer.
+        { id: 'gl-ambient-video',       dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', ambientEnabled: true, ambientAmount: 0.25 } },
+        { id: 'gl-displacement-video',  dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', displacement: 0.4 } },
+        { id: 'displacement-video',     dynamic: true,  opts: { mode: 'dots', displacement: 0.4 } },
+        { id: 'gl-rotation-video',      dynamic: true,  opts: { mode: 'blocks', renderer: 'webgl', rotation: 30 } },
+        { id: 'rotation-video',         dynamic: true,  opts: { mode: 'blocks', rotation: 30 } },
+        { id: 'gl-ascii-video',         dynamic: true,  opts: { mode: 'ascii', renderer: 'webgl' } },
+        { id: 'gl-hybrid-video',        dynamic: true,  opts: { mode: 'hybrid', renderer: 'webgl' } },
+        { id: 'gl-palette-video',       dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', colorMode: 'palette' } },
+        { id: 'gl-mask-video',          dynamic: true,  mask: true, opts: { mode: 'dots', renderer: 'webgl' } },
+        { id: 'mask-video',             dynamic: true,  mask: true, opts: { mode: 'dots' } },
+        { id: 'gl-mix-video',           dynamic: true,  secondary: true, opts: { mode: 'dots', renderer: 'webgl', sourceMix: 0.5 } },
+        { id: 'mix-video',              dynamic: true,  secondary: true, opts: { mode: 'dots', sourceMix: 0.5 } },
+        // The real-world case: animated ASCII on a page that is also animating.
+        { id: 'ascii-ambient',          dynamic: false, opts: { mode: 'ascii', renderer: 'webgl', ambientEnabled: true, ambientAmount: 0.25 } },
+        { id: 'ascii-drift-video',      dynamic: true,  opts: { mode: 'ascii', renderer: 'webgl', ambientEnabled: true, ambientAmount: 0.25 } },
+        { id: 'ascii-scramble',         dynamic: false, opts: { mode: 'ascii', renderer: 'webgl', glyphScramble: 0.3 } },
+        { id: 'gl-symbols-video',       dynamic: true, symbol: true, opts: { mode: 'symbols', renderer: 'webgl' } },
+        { id: 'symbols-video',          dynamic: true, symbol: true, opts: { mode: 'symbols' } },
+        { id: 'gl-tonemap-video',       dynamic: true, symbol: true, opts: { mode: 'symbols', renderer: 'webgl', toneMap: [
+          { min: 0, max: 0.5, primitive: 'symbol', symbol: 'star', scale: 1 },
+          { min: 0.5, max: 1, primitive: 'symbol', symbol: 'star', scale: 0.6, color: '#22aa66' }
+        ] } },
+        { id: 'tonemap-video',          dynamic: true, symbol: true, opts: { mode: 'symbols', toneMap: [
+          { min: 0, max: 0.5, primitive: 'symbol', symbol: 'star', scale: 1 },
+          { min: 0.5, max: 1, primitive: 'symbol', symbol: 'star', scale: 0.6, color: '#22aa66' }
+        ] } }
       ];
 
       const median = (a) => {
@@ -99,6 +172,16 @@
         return s[Math.min(s.length - 1, Math.floor(s.length * p))];
       };
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      function releaseContext(fx) {
+        // Capture before destroy(), which can swap the canvas out.
+        const canvas = fx.canvas;
+        fx.destroy();
+        try {
+          const gl = canvas.getContext('webgl');
+          gl?.getExtension('WEBGL_lose_context')?.loseContext();
+        } catch { /* already gone */ }
+      }
 
       async function makeHost() {
         const host = document.createElement('div');
@@ -115,6 +198,9 @@
         const fx = new Lib.AgencyDitherFX(host, { ...BASE, ...scenario.opts });
         try {
           await fx.setSource(scenario.dynamic ? DYNAMIC_SOURCE : STATIC_SOURCE);
+          if (scenario.mask) await fx.setMaskSource(MASK_SOURCE);
+          if (scenario.secondary) await fx.setSecondarySource(SMOOTH_SOURCE);
+          if (scenario.symbol) await fx.registerSymbol('star', SYMBOL_SVG);
           fx.stop();
 
           // warmup: JIT + first-frame allocations
@@ -200,7 +286,7 @@
             drawMs: draw.length ? median(draw) : null
           };
         } finally {
-          fx.destroy();
+          releaseContext(fx);
           host.remove();
         }
       }
@@ -257,7 +343,7 @@
           gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
           return { w, h, data: px };
         } finally {
-          fx.destroy();
+          releaseContext(fx);
           host.remove();
         }
       }
@@ -293,6 +379,383 @@
             });
           } catch (error) {
             out.push({ id: scenario.id, error: String(error && error.message || error) });
+          }
+        }
+        return out;
+      };
+
+      // ---- WebGL transparency correctness --------------------------------
+      // The shader can output a fully transparent pixel. If the draw is blended
+      // over the framebuffer instead of replacing it, a src alpha of 0 leaves
+      // the PREVIOUS frame visible, so a reveal animation never clears.
+      window.__correctness = async () => {
+        const B = await import('./lib-optimized.js');
+        // The baseline is a local build artifact; CI only has the current one.
+        const A = await import('./lib-baseline.js').catch(() => null);
+        const libs = A ? [['baseline', A], ['optimized', B]] : [['optimized', B]];
+        const out = [];
+        for (const [name, Lib] of libs) {
+          const host = await makeHost();
+          const fx = new Lib.AgencyDitherFX(host, {
+            ...BASE,
+            mode: 'dots',
+            renderer: 'webgl',
+            backgroundTransparent: true,
+            stagger: false,
+            revealProgress: 1
+          });
+          try {
+            await fx.setSource(STATIC_SOURCE);
+            fx.stop();
+            const gl = fx.canvas.getContext('webgl');
+            if (!gl) { out.push({ lib: name, skipped: true }); continue; }
+
+            // Frame 1: fully revealed, so ink is painted across the canvas.
+            fx.render(1000);
+            const w = fx.canvas.width, h = fx.canvas.height;
+            const first = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, first);
+            let inkedFirst = 0;
+            for (let i = 3; i < first.length; i += 4) if (first[i] > 0) inkedFirst += 1;
+
+            // Frame 2: nothing revealed, so every pixel must be transparent.
+            fx.set({ revealProgress: 0 });
+            fx.render(1016);
+            const second = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, second);
+            let residue = 0;
+            let maxAlpha = 0;
+            for (let i = 3; i < second.length; i += 4) {
+              if (second[i] > 0) residue += 1;
+              if (second[i] > maxAlpha) maxAlpha = second[i];
+            }
+            out.push({
+              lib: name,
+              pixels: w * h,
+              inkedFirst,
+              residue,
+              maxAlpha,
+              clean: residue === 0
+            });
+          } catch (error) {
+            out.push({ lib: name, error: String(error && error.message || error) });
+          } finally {
+            fx.destroy();
+            host.remove();
+          }
+        }
+        return out;
+      };
+
+      // ---- Canvas vs WebGL divergence ------------------------------------
+      // Both renderers claim to draw the same effect. This measures how far
+      // apart they actually are on an identical configuration.
+      window.__renderers = async () => {
+        const Lib = await import('./lib-optimized.js');
+        const CONFIGS = [
+          // Smooth source + no dither: isolates the tone pipeline and geometry.
+          { id: 'smooth-raw-nodith', smooth: true, opts: { mode: 'raw-dither', noiseAmount: 0, ditherAmount: 0 } },
+          { id: 'smooth-raw-dith',   smooth: true, opts: { mode: 'raw-dither', noiseAmount: 0 } },
+          { id: 'smooth-dots',       smooth: true, opts: { mode: 'dots', noiseAmount: 0 } },
+          { id: 'dots-default',   opts: { mode: 'dots' } },
+          { id: 'dots-nonoise',   opts: { mode: 'dots', noiseAmount: 0 } },
+          { id: 'blocks-nonoise', opts: { mode: 'blocks', noiseAmount: 0 } },
+          { id: 'raw-nonoise',    opts: { mode: 'raw-dither', noiseAmount: 0 } },
+          // raw-dither has no antialiasing, so this isolates the noise term.
+          { id: 'raw-noise',      opts: { mode: 'raw-dither' } },
+          { id: 'smooth-raw-noise', smooth: true, opts: { mode: 'raw-dither' } },
+          { id: 'dots-flat',      opts: { mode: 'dots', noiseAmount: 0, contrast: 1, ditherAmount: 1 } },
+          { id: 'dots-reveal-50', opts: { mode: 'dots', noiseAmount: 0, revealProgress: 0.5 } },
+          // Motion paths, newly expressible in the shader.
+          { id: 'ambient-drift',   opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientAmount: 0.25 } },
+          { id: 'ambient-orbit',   opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'orbit', ambientAmount: 0.3 } },
+          { id: 'ambient-pulse',   opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'pulse', ambientAmount: 0.4 } },
+          { id: 'ambient-wave',    opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'wave', ambientAmount: 0.3 } },
+          { id: 'displacement',    opts: { mode: 'dots', noiseAmount: 0, displacement: 0.4 } },
+          { id: 'rotation-blocks', opts: { mode: 'blocks', noiseAmount: 0, rotation: 30 } },
+          { id: 'ascii',           opts: { mode: 'ascii', noiseAmount: 0 } },
+          // Canvas only eases revealProgress when stagger is on.
+          { id: 'reveal-nostagger', opts: { mode: 'dots', noiseAmount: 0, stagger: false, revealProgress: 0.5 } },
+          // dotScale over 1 pushes dots past their own cell.
+          { id: 'dotscale-big',     opts: { mode: 'dots', noiseAmount: 0, dotScale: 1.3 } },
+          { id: 'hybrid',           opts: { mode: 'hybrid', noiseAmount: 0 } },
+          { id: 'color-source',     opts: { mode: 'dots', noiseAmount: 0, colorMode: 'source' } },
+          { id: 'color-palette',    opts: { mode: 'dots', noiseAmount: 0, colorMode: 'palette' } },
+          { id: 'color-brightness', opts: { mode: 'dots', noiseAmount: 0, colorMode: 'brightness' } },
+          { id: 'mask-plain',   mask: true, opts: { mode: 'dots', noiseAmount: 0 } },
+          { id: 'mask-feather', mask: true, opts: { mode: 'dots', noiseAmount: 0, maskThreshold: 0.35, maskFeather: 0.12 } },
+          { id: 'mask-invert',  mask: true, opts: { mode: 'dots', noiseAmount: 0, maskInvert: true, maskProgress: 0.8 } },
+          { id: 'mix-half',  secondary: true, opts: { mode: 'dots', noiseAmount: 0, sourceMix: 0.5 } },
+          { id: 'mix-full',  secondary: true, opts: { mode: 'dots', noiseAmount: 0, sourceMix: 1 } },
+          // 'contain' leaves letterboxing, which Canvas fills with the background
+          // colour and then dithers like any other cell.
+          { id: 'contain-fit', opts: { mode: 'dots', noiseAmount: 0, fit: 'contain' } },
+          { id: 'ascii-scramble',  opts: { mode: 'ascii', noiseAmount: 0, glyphScramble: 0.3 } },
+          { id: 'ascii-scramble-hi', opts: { mode: 'ascii', noiseAmount: 0, glyphScramble: 0.9 } },
+          { id: 'glyph-random',   opts: { mode: 'ascii', noiseAmount: 0, glyphSelection: 'random', glyphSeed: 7 } },
+          { id: 'glyph-binary',   opts: { mode: 'ascii', noiseAmount: 0, glyphSelection: 'random', glyphRamp: ' #', glyphProbability: 0.4 } },
+          { id: 'ambient-jitter', opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'jitter', ambientAmount: 0.3 } },
+          { id: 'symbols',      symbol: true, opts: { mode: 'symbols', noiseAmount: 0 } },
+          { id: 'symbols-big',  symbol: true, opts: { mode: 'symbols', noiseAmount: 0, symbolScale: 1.6 } },
+          { id: 'tonemap-basic', opts: { mode: 'dots', noiseAmount: 0, toneMap: [
+            { min: 0, max: 0.33, primitive: 'block', scale: 0.8 },
+            { min: 0.33, max: 0.66, primitive: 'dot', scale: 1.2, color: '#ef5a37' },
+            { min: 0.66, max: 1, primitive: 'none' }
+          ] } },
+          { id: 'tonemap-motion', opts: { mode: 'dots', noiseAmount: 0, toneMap: [
+            { min: 0, max: 0.5, primitive: 'dot', scale: 1, offsetX: 0.2, offsetY: -0.1 },
+            { min: 0.5, max: 1, primitive: 'block', scale: 0.6, rotation: 25, color: '#3355ff' }
+          ] } },
+          // The shipped Binary Signal Mask preset, minus its renderer pin.
+          { id: 'binary-signal', opts: {
+            mode: 'ascii', algorithm: 'threshold', fit: 'cover', cellSize: 14,
+            background: '#000000', foreground: '#f7f7f3', colorMode: 'brightness',
+            palette: ['#242419', '#f7f7f3'], contrast: 2.2, brightness: -0.04,
+            gamma: 0.75, invert: true, threshold: 0.5, ditherAmount: 0,
+            glyphRamp: '01', glyphSelection: 'random', glyphSeed: 41,
+            glyphProbability: 0.5, fontWeight: 700, stagger: false
+          } },
+          { id: 'tonemap-symbol', symbol: true, opts: { mode: 'symbols', noiseAmount: 0, toneMap: [
+            { min: 0, max: 0.5, primitive: 'symbol', symbol: 'star', scale: 1 },
+            { min: 0.5, max: 1, primitive: 'symbol', symbol: 'star', scale: 0.6, color: '#22aa66' }
+          ] } }
+        ];
+        const out = [];
+        for (const cfg of CONFIGS) {
+          const shots = {};
+          for (const renderer of ['canvas', 'webgl']) {
+            const host = await makeHost();
+            const fx = new Lib.AgencyDitherFX(host, {
+              ...BASE, ...cfg.opts, renderer, immediate: true
+            });
+            try {
+              await fx.setSource(cfg.smooth ? SMOOTH_SOURCE : STATIC_SOURCE);
+            if (cfg.mask) await fx.setMaskSource(MASK_SOURCE);
+            if (cfg.secondary) await fx.setSecondarySource(SMOOTH_SOURCE);
+            if (cfg.symbol) await fx.registerSymbol('star', SYMBOL_SVG);
+              fx.stop();
+              fx.render(4000);
+              const w = fx.canvas.width, h = fx.canvas.height;
+              const ctx = fx.canvas.getContext('2d');
+              if (ctx) {
+                shots[renderer] = { w, h, data: ctx.getImageData(0, 0, w, h).data, kind: fx.getStats().renderer };
+              } else {
+                const gl = fx.canvas.getContext('webgl');
+                const px = new Uint8Array(w * h * 4);
+                gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+                // readPixels is bottom-up; flip to match getImageData order.
+                const flipped = new Uint8Array(px.length);
+                const stride = w * 4;
+                for (let y = 0; y < h; y += 1) {
+                  flipped.set(px.subarray((h - 1 - y) * stride, (h - y) * stride), y * stride);
+                }
+                shots[renderer] = { w, h, data: flipped, kind: fx.getStats().renderer };
+              }
+            } finally {
+              fx.destroy();
+              host.remove();
+            }
+          }
+          const a = shots.canvas, b = shots.webgl;
+          let sum = 0, differing = 0, maxDiff = 0;
+          // Bucket by magnitude: small deltas are antialiasing on primitive
+          // edges, large ones mean a cell is on in one renderer and off in the other.
+          let b32 = 0, b64 = 0, b128 = 0;
+          // Compare luminance per pixel; ignore alpha so opaque configs compare cleanly.
+          for (let i = 0; i < a.data.length; i += 4) {
+            const la = (a.data[i] * 0.2126 + a.data[i + 1] * 0.7152 + a.data[i + 2] * 0.0722);
+            const lb = (b.data[i] * 0.2126 + b.data[i + 1] * 0.7152 + b.data[i + 2] * 0.0722);
+            const d = Math.abs(la - lb);
+            if (d > 8) differing += 1;
+            if (d > 32) b32 += 1;
+            if (d > 64) b64 += 1;
+            if (d > 128) b128 += 1;
+            sum += d;
+            if (d > maxDiff) maxDiff = d;
+          }
+          const pixels = a.data.length / 4;
+          // Sanity check: if the un-flipped comparison scores better, the flip
+          // in this harness is backwards and every number above is meaningless.
+          let unflipped = 0;
+          const stride = a.w * 4;
+          for (let y = 0; y < a.h; y += 1) {
+            const srcRow = (a.h - 1 - y) * stride;
+            for (let x = 0; x < stride; x += 4) {
+              const i = y * stride + x;
+              const j = srcRow + x;
+              const la = (a.data[i] * 0.2126 + a.data[i + 1] * 0.7152 + a.data[i + 2] * 0.0722);
+              const lb = (b.data[j] * 0.2126 + b.data[j + 1] * 0.7152 + b.data[j + 2] * 0.0722);
+              unflipped += Math.abs(la - lb);
+            }
+          }
+          out.push({
+            id: cfg.id,
+            actual: `${a.kind}/${b.kind}`,
+            meanDiff: sum / pixels,
+            meanUnflipped: unflipped / pixels,
+            maxDiff,
+            pctPixels: (differing / pixels) * 100,
+            pct32: (b32 / pixels) * 100,
+            pct64: (b64 / pixels) * 100,
+            pct128: (b128 / pixels) * 100
+          });
+        }
+        return out;
+      };
+
+      // ---- noise readback --------------------------------------------------
+      // A flat 50% grey source with ditherAmount 0 and noiseAmount 1 makes
+      // raw-dither output exactly the noise value, so it can be compared with
+      // the JS hash directly.
+      window.__noise = async () => {
+        const Lib = await import('./lib-optimized.js');
+        const grey = document.createElement('canvas');
+        grey.width = 64; grey.height = 64;
+        const gctx = grey.getContext('2d');
+        gctx.fillStyle = 'rgb(128 128 128)';
+        gctx.fillRect(0, 0, 64, 64);
+        const GREY = await new Promise((r) => {
+          const img = new Image();
+          img.onload = () => r(img);
+          img.src = grey.toDataURL('image/png');
+        });
+
+        const opts = {
+          ...BASE, mode: 'raw-dither', renderer: 'webgl', immediate: true,
+          noiseAmount: 1, ditherAmount: 0, contrast: 1, brightness: 0,
+          gamma: 1, threshold: 0.5, cellSize: 8, fit: 'fill'
+        };
+        const host = await makeHost();
+        const fx = new Lib.AgencyDitherFX(host, opts);
+        let result;
+        try {
+          await fx.setSource(GREY);
+          fx.stop();
+          fx.render(4000);
+          const w = fx.canvas.width, h = fx.canvas.height;
+          const gl = fx.canvas.getContext('webgl');
+          const px = new Uint8Array(w * h * 4);
+          gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          const stats = fx.getStats();
+          const cols = Math.round(stats.cells / Math.round(h / (h / (stats.cells / (w / (w / 1))))));
+          // Sample the centre of the first few cells along the top row.
+          const cellW = w / Math.round(w / 8);
+          const read = [];
+          for (let i = 0; i < 8; i += 1) {
+            const cx = Math.floor((i + 0.5) * cellW);
+            // readPixels is bottom-up: the top row of the image is the last row.
+            const cy = h - 1 - Math.floor(0.5 * cellW);
+            read.push(px[(cy * w + cx) * 4]);
+          }
+          result = { read, w, h, cells: stats.cells };
+        } finally {
+          releaseContext(fx);
+          host.remove();
+        }
+        return result;
+      };
+
+      window.__precision = () => {
+        const gl = document.createElement('canvas').getContext('webgl');
+        const f = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+        const m = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.MEDIUM_FLOAT);
+        return { highpSupported: f.precision > 0, highpBits: f.precision, mediumBits: m.precision };
+      };
+
+      window.__diag = async () => {
+        {
+          const Lib = await import('./lib-optimized.js');
+          const host = await makeHost();
+          const fx = new Lib.AgencyDitherFX(host, { ...BASE, mode: 'symbols', renderer: 'webgl', immediate: true });
+          await fx.setSource(STATIC_SOURCE);
+          await fx.registerSymbol('star', SYMBOL_SVG);
+          fx.render(1000);
+          const st = fx.getStats();
+          const gl = fx.canvas.getContext('webgl');
+          let nonBg = 0;
+          if (gl) {
+            const px = new Uint8Array(fx.canvas.width * fx.canvas.height * 4);
+            gl.readPixels(0, 0, fx.canvas.width, fx.canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            for (let i = 0; i < px.length; i += 4) if (px[i] > 200 && px[i+1] < 150) nonBg++;
+            const w = fx.canvas.width, h = fx.canvas.height;
+            const at = (x, y) => { const i = ((h - 1 - y) * w + x) * 4; return [px[i], px[i+1], px[i+2], px[i+3]]; };
+            globalThis.__symbolPixels = [at(300, 300), at(303, 300), at(306, 303), at(640, 360)];
+          }
+          const probe = await new Promise((res) => {
+            const blob = new Blob([SYMBOL_SVG], { type: 'image/svg+xml' });
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.onload = () => res({ w: img.naturalWidth, h: img.naturalHeight, ok: true });
+            img.onerror = (e) => res({ ok: false, err: String(e) });
+            img.src = url;
+          });
+          globalThis.__symbolDiag = {
+            probe,
+            renderer: st.renderer,
+            warning: st.warning,
+            orangePixels: nonBg,
+            canvasPixels: fx.canvas.width * fx.canvas.height
+          };
+          fx.destroy(); host.remove();
+        }
+        const Lib = await import('./lib-optimized.js');
+        const out = [];
+        for (const cfg of [
+          { id: 'plain', secondary: false },
+          { id: 'secondary', secondary: true }
+        ]) {
+          const host = await makeHost();
+          const fx = new Lib.AgencyDitherFX(host, {
+            ...BASE, mode: 'dots', renderer: 'webgl', immediate: true, sourceMix: 0.5
+          });
+          try {
+            await fx.setSource(DYNAMIC_SOURCE);
+            if (cfg.secondary) await fx.setSecondarySource(SMOOTH_SOURCE);
+            fx.render(1000);
+            const st = fx.getStats();
+            out.push({ id: cfg.id, renderer: st.renderer, warning: st.warning });
+          } catch (e) {
+            out.push({ id: cfg.id, error: String(e && e.message || e) });
+          } finally { fx.destroy(); host.remove(); }
+        }
+        return out;
+      };
+
+      // Per-frame main-thread cost is below performance.now() resolution, so
+      // time a large batch and divide.
+      window.__micro = async () => {
+        const Lib = await import('./lib-optimized.js');
+        const CASES = [
+          { id: 'dots',          opts: { mode: 'dots' } },
+          { id: 'ascii',         opts: { mode: 'ascii' } },
+          { id: 'ascii+scramble',opts: { mode: 'ascii', glyphScramble: 0.3 } },
+          { id: 'symbols',       symbol: true, opts: { mode: 'symbols' } },
+          { id: 'tonemap',       symbol: true, opts: { mode: 'symbols', toneMap: [
+            { min: 0, max: 0.5, primitive: 'symbol', symbol: 'star', scale: 1 },
+            { min: 0.5, max: 1, primitive: 'symbol', symbol: 'star', scale: 0.6, color: '#22aa66' }
+          ] } },
+          { id: 'palette',       opts: { mode: 'dots', colorMode: 'palette' } }
+        ];
+        const out = [];
+        for (const c of CASES) {
+          const host = await makeHost();
+          const fx = new Lib.AgencyDitherFX(host, {
+            ...BASE, ...c.opts, renderer: 'webgl', immediate: true
+          });
+          try {
+            await fx.setSource(DYNAMIC_SOURCE);
+            if (c.symbol) await fx.registerSymbol('star', SYMBOL_SVG);
+            fx.stop();
+            let t = 1000;
+            for (let i = 0; i < 100; i += 1) { fx.render(t); t += 16.7; }
+            const N = 2000;
+            const start = performance.now();
+            for (let i = 0; i < N; i += 1) { fx.render(t); t += 16.7; }
+            const elapsed = performance.now() - start;
+            out.push({ id: c.id, renderer: fx.getStats().renderer, usPerFrame: (elapsed / N) * 1000 });
+          } finally {
+            releaseContext(fx);
+            host.remove();
           }
         }
         return out;

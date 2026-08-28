@@ -11,12 +11,19 @@ const ROOT = resolve(import.meta.dirname, '..');
 const PORT = 8931;
 const DEBUG_PORT = 9333;
 
+// CHROME_PATH wins, so CI can point at whatever the runner ships.
 const CHROME_CANDIDATES = [
+  process.env.CHROME_PATH,
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Microsoft/Edge/Application/msedge.exe'
-];
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium-browser',
+  '/usr/bin/chromium',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+].filter(Boolean);
 
 const MIME = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
@@ -34,6 +41,12 @@ const ROUNDS = Number(flag('rounds', 3));
 const ONLY = flag('only', '');
 const OUT = flag('out', '');
 const VERIFY = args.includes('--verify');
+const CORRECTNESS = args.includes('--correctness');
+const RENDERERS = args.includes('--renderers');
+// As a gate, a shader regression shows up either as a fallback to Canvas or as
+// a jump in the share of cells the two renderers disagree about.
+const GATE = args.includes('--gate');
+const GATE_LIMIT = Number(flag('gate-limit', 2));
 const BATCH = flag('batch', '');
 
 // ---------------------------------------------------------------- server
@@ -73,7 +86,17 @@ const chromeArgs = [
   '--window-position=40,40',
   `http://127.0.0.1:${PORT}/bench/bench.html`
 ];
-if (HEADLESS) chromeArgs.unshift('--headless=new', '--hide-scrollbars');
+if (HEADLESS) {
+  chromeArgs.unshift(
+    '--headless=new',
+    '--hide-scrollbars',
+    // A CI runner has no GPU; SwiftShader still exercises the shader paths.
+    '--use-gl=angle',
+    '--use-angle=swiftshader',
+    '--enable-unsafe-swiftshader',
+    '--no-sandbox'
+  );
+}
 
 const chrome = spawn(chromePath, chromeArgs, { stdio: 'ignore' });
 
@@ -139,6 +162,108 @@ const ua = await evaluate('navigator.userAgent');
 
 if (BATCH) await evaluate(`globalThis.__ADFX_BATCH = ${BATCH === 'inf' ? 'Infinity' : Number(BATCH)}`);
 const only = ONLY ? JSON.stringify(ONLY.split(',')) : 'null';
+if (args.includes('--noise')) {
+  const res = await evaluate('window.__noise()');
+  const hash = (x, y, seed) => {
+    let v = Math.imul(x + seed * 1013, 374761393) ^ Math.imul(y + seed * 7919, 668265263);
+    v = Math.imul(v ^ (v >>> 13), 1274126177);
+    return ((v ^ (v >>> 16)) >>> 0) / 4294967295;
+  };
+  const frame = Math.floor(4000 * 0.35 * 0.02);
+  console.log('\nnoise readback: shader vs Canvas hash (frame ' + frame + ')');
+  console.log('cell  shader  expected');
+  res.read.forEach((got, x) => {
+    const want = Math.round(hash(x, 0, frame) * 255);
+    console.log(String(x).padStart(4) + String(got).padStart(8) + String(want).padStart(10) +
+      (Math.abs(got - want) <= 2 ? '  ok' : '  MISMATCH'));
+  });
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(0);
+}
+if (args.includes('--diag')) {
+  const rows = await evaluate('window.__diag()');
+  console.log('symbolDiag', JSON.stringify(await evaluate('globalThis.__symbolDiag')));
+  console.log('symbolPixels', JSON.stringify(await evaluate('globalThis.__symbolPixels')));
+  for (const row of rows) console.log(JSON.stringify(row));
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(0);
+}
+if (args.includes('--precision')) {
+  console.log(JSON.stringify(await evaluate('window.__precision()')));
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(0);
+}
+if (args.includes('--micro')) {
+  const rows = await evaluate('window.__micro()');
+  console.log('\nmain-thread CPU cost of one WebGL frame');
+  console.log('-'.repeat(52));
+  for (const row of rows) {
+    console.log(row.id.padEnd(16) + row.renderer.padEnd(8) + row.usPerFrame.toFixed(1).padStart(9) + ' us');
+  }
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(0);
+}
+if (RENDERERS) {
+  const rows = await evaluate('window.__renderers()');
+  console.log('\nCanvas vs WebGL on identical config (luminance delta, 0-255)');
+  console.log('-'.repeat(78));
+  for (const row of rows) {
+    console.log(
+      `${row.id.padEnd(16)} ${row.actual.padEnd(16)}` +
+      ` mean=${row.meanDiff.toFixed(2).padStart(6)}` +
+      ` max=${row.maxDiff.toFixed(0).padStart(4)}` +
+      ` >8:${row.pctPixels.toFixed(1).padStart(5)}%` +
+      ` >32:${row.pct32.toFixed(1).padStart(5)}%` +
+      ` >64:${row.pct64.toFixed(1).padStart(5)}%` +
+      ` >128:${row.pct128.toFixed(1).padStart(5)}%`
+    );
+  }
+  let failures = 0;
+  if (GATE) {
+    for (const row of rows) {
+      if (!row.actual.endsWith('/webgl')) {
+        console.error(`FAIL ${row.id}: expected WebGL, got ${row.actual}`);
+        failures += 1;
+      } else if (row.pct128 > GATE_LIMIT) {
+        console.error(
+          `FAIL ${row.id}: ${row.pct128.toFixed(2)}% of cells disagree ` +
+          `(limit ${GATE_LIMIT}%)`
+        );
+        failures += 1;
+      }
+    }
+    console.log(
+      failures
+        ? `\n${failures} scenario(s) failed`
+        : '\nall scenarios within limits'
+    );
+  }
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(failures ? 1 : 0);
+}
+if (CORRECTNESS) {
+  const rows = await evaluate('window.__correctness()');
+  console.log('\nWebGL transparent-reveal residue (frame 2 must be fully clear)');
+  console.log('-'.repeat(72));
+  for (const row of rows) {
+    if (row.skipped) { console.log(`${row.lib.padEnd(11)} skipped`); continue; }
+    if (row.error) { console.log(`${row.lib.padEnd(11)} ERROR ${row.error}`); continue; }
+    console.log(
+      `${row.lib.padEnd(11)} frame1 inked=${String(row.inkedFirst).padStart(7)}` +
+      `  frame2 residue=${String(row.residue).padStart(7)}` +
+      `  maxAlpha=${String(row.maxAlpha).padStart(3)}  ` +
+      (row.clean ? 'CLEAN' : 'STALE PIXELS')
+    );
+  }
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(rows.some(r => r.lib === 'optimized' && !r.clean) ? 1 : 0);
+}
 if (VERIFY) {
   const rows = await evaluate(`window.__verify({ only: ${only} })`);
   console.log('\npixel parity: baseline vs optimized');
@@ -193,7 +318,8 @@ if (hasB) {
       pad(id, 24) + pad(a.cells, 8) +
       num(a.flushedMs, 10) + num(b.flushedMs, 12) +
       num(a.capableFps, 15, 1) + num(b.capableFps, 13, 1) +
-      num(a.flushedMs / b.flushedMs, 14, 2) + 'x'
+      num(a.flushedMs / b.flushedMs, 14, 2) + 'x' +
+      (b.renderer !== a.renderer || b.warning ? `   [${b.renderer}${b.warning ? ': ' + b.warning : ''}]` : '')
     );
   }
   console.log('\nlive rAF fps (vsync-bound) and phase breakdown (median ms):');

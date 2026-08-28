@@ -2,7 +2,9 @@ import type { AgencyDitherOptions } from './types';
 
 export const DEFAULT_OPTIONS: AgencyDitherOptions = {
   mode: 'dots',
-  renderer: 'canvas',
+  // GPU by default. Configurations the shader cannot express fall back to
+  // Canvas automatically and report the reason through `warning`.
+  renderer: 'webgl',
   algorithm: 'bayer8',
   fit: 'cover',
   cellSize: 9,
