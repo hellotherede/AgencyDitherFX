@@ -22,10 +22,17 @@ const FRAGMENT_SHADER = `
 precision mediump float;
 
 uniform sampler2D u_source;
+// Per-cell noise baked on the CPU with the same integer hash the Canvas
+// renderer uses. GLSL ES 1.00 has no bitwise operators, so the hash cannot be
+// reproduced in the shader; sampling it keeps both renderers in agreement.
+// R = hash(x, y, frame) for value noise and the random algorithm.
+// G = the averaged pair the blue-noise algorithm uses.
+uniform sampler2D u_noise;
 uniform vec2 u_cssSize;
 uniform vec2 u_gridSize;
 uniform vec4 u_drawRect;
-uniform float u_cellSize;
+uniform vec2 u_cellSize;
+uniform vec2 u_pixel;
 uniform float u_threshold;
 uniform float u_ditherAmount;
 uniform float u_contrast;
@@ -35,7 +42,6 @@ uniform float u_noiseAmount;
 uniform float u_dotScale;
 uniform float u_revealProgress;
 uniform float u_staggerAmount;
-uniform float u_time;
 uniform vec4 u_foreground;
 uniform vec4 u_background;
 uniform int u_mode;
@@ -75,7 +81,7 @@ float bayerRank(vec2 cell, float size) {
   return rank / (size * size);
 }
 
-float localThreshold(vec2 cell, float base) {
+float localThreshold(vec2 cell, float base, vec2 noise) {
   float threshold = base;
   if (u_algorithm == 1) {
     threshold += (bayerRank(cell, 2.0) - 0.5) * u_ditherAmount;
@@ -86,11 +92,9 @@ float localThreshold(vec2 cell, float base) {
   } else if (u_algorithm == 4) {
     threshold += (bayerRank(cell, 16.0) - 0.5) * u_ditherAmount;
   } else if (u_algorithm == 5) {
-    float a = hash(cell + vec2(17.0, 41.0));
-    float b = hash(cell * 1.73 + vec2(7.0, 13.0));
-    threshold += (((a + b) * 0.5) - 0.5) * u_ditherAmount;
+    threshold += (noise.y - 0.5) * u_ditherAmount;
   } else if (u_algorithm == 6) {
-    threshold += (hash(cell + floor(u_time * 0.02)) - 0.5) * u_ditherAmount;
+    threshold += (noise.x - 0.5) * u_ditherAmount;
   } else if (u_algorithm == 7) {
     vec2 p = mod(cell, 6.0) - 2.5;
     threshold += (length(p) / 3.54 - 0.5) * u_ditherAmount;
@@ -143,7 +147,7 @@ float revealForCell(vec2 cell) {
 
 void main() {
   vec2 css = vec2(v_uv.x, 1.0 - v_uv.y) * u_cssSize;
-  vec2 cell = floor(css / max(1.0, u_cellSize));
+  vec2 cell = floor(css / max(vec2(1.0), u_cellSize));
   vec2 center = (cell + 0.5) * u_cellSize;
   vec2 sourceUv = (center - u_drawRect.xy) / u_drawRect.zw;
   vec4 background = u_backgroundTransparent ? vec4(u_background.rgb, 0.0) : u_background;
@@ -156,16 +160,14 @@ void main() {
     return;
   }
 
+  vec2 noise = texture2D(u_noise, (cell + 0.5) / u_gridSize).rg;
   vec4 source = texture2D(u_source, sourceUv);
   float value = luminance(source.rgb);
   value = pow(clamp((value - 0.5) * u_contrast + 0.5 + u_brightness, 0.0, 1.0), u_gamma);
-  value = clamp(
-    value + (hash(cell + floor(u_time * 0.02)) - 0.5) * u_noiseAmount,
-    0.0,
-    1.0
-  );
+  // Canvas inverts before adding noise, so the noise is not mirrored with it.
   if (u_invert) value = 1.0 - value;
-  float threshold = localThreshold(cell, u_threshold);
+  value = clamp(value + (noise.x - 0.5) * u_noiseAmount, 0.0, 1.0);
+  float threshold = localThreshold(cell, u_threshold, noise);
   float binary = value >= threshold ? 1.0 : 0.0;
   float dithered = mix(value, binary, u_ditherAmount);
   float reveal = revealForCell(cell);
@@ -183,21 +185,32 @@ void main() {
   }
 
   vec2 local = css - cell * u_cellSize;
-  float scale = (0.15 + dithered * 0.85) * reveal;
-  float alpha = 0.0;
+  vec2 cellCenter = u_cellSize * 0.5;
+  float scale = (0.15 + dithered * 0.85) * (0.35 + reveal * 0.65);
+  // Canvas rasterises arcs and rects with antialiasing. A hard inside/outside
+  // test left every primitive edge jagged, which was both a quality regression
+  // and the bulk of the remaining difference between the two renderers.
+  float coverage = 0.0;
 
   if (u_mode == 1 || u_mode == 3) {
-    float radius = u_cellSize * 0.5 * scale * u_dotScale;
-    alpha = distance(local, vec2(u_cellSize * 0.5)) <= radius ? reveal : 0.0;
+    float radius = min(u_cellSize.x, u_cellSize.y) * 0.5 * scale * u_dotScale;
+    float edge = max(u_pixel.x, u_pixel.y) * 0.5;
+    coverage = 1.0 - smoothstep(radius - edge, radius + edge, distance(local, cellCenter));
   } else {
-    vec2 halfSize = vec2(u_cellSize * 0.5 * scale);
-    vec2 distanceFromCenter = abs(local - vec2(u_cellSize * 0.5));
-    alpha = distanceFromCenter.x <= halfSize.x && distanceFromCenter.y <= halfSize.y
-      ? reveal
-      : 0.0;
+    vec2 halfSize = u_cellSize * 0.5 * scale;
+    vec2 edge = u_pixel * 0.5;
+    vec2 fade = vec2(1.0) - smoothstep(halfSize - edge, halfSize + edge, abs(local - cellCenter));
+    coverage = fade.x * fade.y;
   }
 
-  gl_FragColor = alpha > 0.0 ? vec4(ink.rgb, ink.a * alpha) : background;
+  // Source-over of the ink onto the background, matching the Canvas renderer
+  // filling the background first and then drawing at globalAlpha = reveal.
+  float srcAlpha = coverage * reveal * ink.a;
+  float outAlpha = srcAlpha + background.a * (1.0 - srcAlpha);
+  vec3 outColor = outAlpha > 0.0
+    ? (ink.rgb * srcAlpha + background.rgb * background.a * (1.0 - srcAlpha)) / outAlpha
+    : background.rgb;
+  gl_FragColor = vec4(outColor, outAlpha);
 }
 `;
 
@@ -238,12 +251,25 @@ const STAGGER: Record<AgencyDitherOptions['staggerFrom'], number> = {
 const clamp = (value: number, min = 0, max = 1): number =>
   Math.min(max, Math.max(min, value));
 
+/**
+ * Byte-for-byte the hash the Canvas renderer and the dither kernel use. Keeping
+ * one definition is what lets the two renderers agree on noise.
+ */
+const hash = (x: number, y: number, seed: number): number => {
+  let value = Math.imul(x + seed * 1013, 374761393) ^
+    Math.imul(y + seed * 7919, 668265263);
+  value = Math.imul(value ^ (value >>> 13), 1274126177);
+  return ((value ^ (value >>> 16)) >>> 0) / 4294967295;
+};
+
 interface WebGLUniforms {
   source: WebGLUniformLocation;
+  noise: WebGLUniformLocation;
   cssSize: WebGLUniformLocation;
   gridSize: WebGLUniformLocation;
   drawRect: WebGLUniformLocation;
   cellSize: WebGLUniformLocation;
+  pixel: WebGLUniformLocation;
   threshold: WebGLUniformLocation;
   ditherAmount: WebGLUniformLocation;
   contrast: WebGLUniformLocation;
@@ -253,7 +279,6 @@ interface WebGLUniforms {
   dotScale: WebGLUniformLocation;
   revealProgress: WebGLUniformLocation;
   staggerAmount: WebGLUniformLocation;
-  time: WebGLUniformLocation;
   foreground: WebGLUniformLocation;
   background: WebGLUniformLocation;
   mode: WebGLUniformLocation;
@@ -358,6 +383,10 @@ const colorCache = new Map<string, [number, number, number, number]>();
 // that uses many instances. Staying under a self-imposed budget means the
 // surplus instances fall back to Canvas instead of evicting each other.
 let liveContexts = 0;
+// Bumped whenever a slot is returned. Instances that were forced onto Canvas
+// watch this so they can retry exactly once per release, instead of attempting
+// (and failing) a context creation on every frame.
+let budgetGeneration = 0;
 
 export class WebGLRenderer implements DitherRenderer {
   /** Maximum simultaneous WebGL instances before new ones fall back to Canvas. */
@@ -365,6 +394,11 @@ export class WebGLRenderer implements DitherRenderer {
 
   static get activeContexts(): number {
     return liveContexts;
+  }
+
+  /** Changes each time a context slot is freed. */
+  static get budgetGeneration(): number {
+    return budgetGeneration;
   }
 
   static fallbackReason(
@@ -410,6 +444,7 @@ export class WebGLRenderer implements DitherRenderer {
   private readonly gl: WebGLRenderingContext;
   private program!: WebGLProgram;
   private texture!: WebGLTexture;
+  private noiseTexture!: WebGLTexture;
   private buffer!: WebGLBuffer;
   private uniforms!: WebGLUniforms;
   private contextLost = false;
@@ -422,7 +457,12 @@ export class WebGLRenderer implements DitherRenderer {
   private dpr = 1;
   private columns = 1;
   private rows = 1;
-  private cellSize = 8;
+  private noiseData = new Uint8Array(0);
+  private noiseColumns = 0;
+  private noiseRows = 0;
+  private noiseFrame = Number.NaN;
+  private cellWidth = 8;
+  private cellHeight = 8;
   private readonly onContextLost = (event: Event): void => {
     event.preventDefault();
     this.contextLost = true;
@@ -450,7 +490,15 @@ export class WebGLRenderer implements DitherRenderer {
     if (!gl) throw new Error('AgencyDitherFX requires WebGL support.');
     this.gl = gl;
     liveContexts += 1;
-    this.createResources();
+    try {
+      this.createResources();
+    } catch (error) {
+      // Shader, program, buffer or texture creation can fail after the context
+      // exists. Give the budget slot back rather than leaking it forever.
+      liveContexts = Math.max(0, liveContexts - 1);
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      throw error;
+    }
     this.canvas.addEventListener('webglcontextlost', this.onContextLost);
     this.canvas.addEventListener('webglcontextrestored', this.onContextRestored);
   }
@@ -466,12 +514,21 @@ export class WebGLRenderer implements DitherRenderer {
     this.texture = gl.createTexture() ?? (() => {
       throw new Error('AgencyDitherFX could not create a WebGL texture.');
     })();
+    this.noiseTexture = gl.createTexture() ?? (() => {
+      throw new Error('AgencyDitherFX could not create a WebGL texture.');
+    })();
+    // A restored context starts with an empty noise texture, so force a rebuild.
+    this.noiseColumns = 0;
+    this.noiseRows = 0;
+    this.noiseFrame = Number.NaN;
     this.uniforms = {
       source: getUniform(gl, this.program, 'u_source'),
+      noise: getUniform(gl, this.program, 'u_noise'),
       cssSize: getUniform(gl, this.program, 'u_cssSize'),
       gridSize: getUniform(gl, this.program, 'u_gridSize'),
       drawRect: getUniform(gl, this.program, 'u_drawRect'),
       cellSize: getUniform(gl, this.program, 'u_cellSize'),
+      pixel: getUniform(gl, this.program, 'u_pixel'),
       threshold: getUniform(gl, this.program, 'u_threshold'),
       ditherAmount: getUniform(gl, this.program, 'u_ditherAmount'),
       contrast: getUniform(gl, this.program, 'u_contrast'),
@@ -481,7 +538,6 @@ export class WebGLRenderer implements DitherRenderer {
       dotScale: getUniform(gl, this.program, 'u_dotScale'),
       revealProgress: getUniform(gl, this.program, 'u_revealProgress'),
       staggerAmount: getUniform(gl, this.program, 'u_staggerAmount'),
-      time: getUniform(gl, this.program, 'u_time'),
       foreground: getUniform(gl, this.program, 'u_foreground'),
       background: getUniform(gl, this.program, 'u_background'),
       mode: getUniform(gl, this.program, 'u_mode'),
@@ -509,6 +565,16 @@ export class WebGLRenderer implements DitherRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    // NEAREST so each cell reads its own baked value rather than a blend of
+    // neighbours, and CLAMP_TO_EDGE because the grid is not power-of-two.
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.noiseTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     // sourceUv is already expressed in top-down CSS coordinates.
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   }
@@ -540,12 +606,14 @@ export class WebGLRenderer implements DitherRenderer {
     if (this.disposed) return;
     this.disposed = true;
     liveContexts = Math.max(0, liveContexts - 1);
+    budgetGeneration += 1;
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost);
     this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored);
     this.uploadedSource = null;
     if (!this.contextLost) {
       this.gl.deleteBuffer(this.buffer);
       this.gl.deleteTexture(this.texture);
+      this.gl.deleteTexture(this.noiseTexture);
       this.gl.deleteProgram(this.program);
       // Frees the backing context immediately instead of waiting for GC, which
       // matters when instances are created and torn down across route changes.
@@ -608,6 +676,8 @@ export class WebGLRenderer implements DitherRenderer {
       return this.stats(warning);
     }
 
+    this.updateNoise(options, time);
+
     const [drawX, drawY, drawWidth, drawHeight] = this.drawRect(source, options);
     const foreground = rgba(options.foreground);
     const background = rgba(options.background, options.transparent ? 0 : 1);
@@ -615,10 +685,17 @@ export class WebGLRenderer implements DitherRenderer {
     const algorithm = ALGORITHMS[options.algorithm] ?? 0;
 
     gl.uniform1i(this.uniforms.source, 0);
+    gl.uniform1i(this.uniforms.noise, 1);
     gl.uniform2f(this.uniforms.cssSize, this.cssWidth, this.cssHeight);
     gl.uniform2f(this.uniforms.gridSize, this.columns, this.rows);
     gl.uniform4f(this.uniforms.drawRect, drawX, drawY, drawWidth, drawHeight);
-    gl.uniform1f(this.uniforms.cellSize, this.cellSize);
+    gl.uniform2f(this.uniforms.cellSize, this.cellWidth, this.cellHeight);
+    // CSS units covered by one device pixel: the width of the antialiased edge.
+    gl.uniform2f(
+      this.uniforms.pixel,
+      this.cssWidth / Math.max(1, this.canvas.width),
+      this.cssHeight / Math.max(1, this.canvas.height)
+    );
     gl.uniform1f(this.uniforms.threshold, options.threshold);
     gl.uniform1f(this.uniforms.ditherAmount, options.ditherAmount);
     gl.uniform1f(this.uniforms.contrast, options.contrast);
@@ -628,7 +705,6 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1f(this.uniforms.dotScale, options.dotScale);
     gl.uniform1f(this.uniforms.revealProgress, options.revealProgress);
     gl.uniform1f(this.uniforms.staggerAmount, options.stagger ? options.staggerAmount : 0);
-    gl.uniform1f(this.uniforms.time, time * options.noiseSpeed);
     gl.uniform4f(this.uniforms.foreground, ...foreground);
     gl.uniform4f(this.uniforms.background, ...background);
     gl.uniform1i(this.uniforms.mode, mode);
@@ -641,8 +717,14 @@ export class WebGLRenderer implements DitherRenderer {
       options.backgroundTransparent || options.transparent ? 1 : 0
     );
 
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // The shader writes the finished pixel, alpha included, for every fragment
+    // of a full-screen quad. Blending it over the previous frame meant a
+    // transparent output (transparent background, or revealProgress driving
+    // alpha to 0) left the old frame visible instead of clearing it. Replacing
+    // the framebuffer outright is both correct and cheaper.
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     return this.stats(warning);
   }
@@ -668,7 +750,53 @@ export class WebGLRenderer implements DitherRenderer {
     }
     this.columns = columns;
     this.rows = rows;
-    this.cellSize = Math.max(this.cssWidth / columns, this.cssHeight / rows);
+    this.cellWidth = this.cssWidth / columns;
+    this.cellHeight = this.cssHeight / rows;
+  }
+
+  /**
+   * Rebuilds the per-cell noise texture when the grid or the noise frame index
+   * changes. The frame index advances a handful of times per second, so this is
+   * a few tens of kilobytes of work well below once per rendered frame.
+   */
+  private updateNoise(options: AgencyDitherOptions, time: number): void {
+    const gl = this.gl;
+    const columns = this.columns;
+    const rows = this.rows;
+    const frame = Math.floor(time * options.noiseSpeed * 0.02);
+    const resized = columns !== this.noiseColumns || rows !== this.noiseRows;
+    if (!resized && frame === this.noiseFrame) return;
+
+    if (resized) {
+      this.noiseData = new Uint8Array(columns * rows * 4);
+      this.noiseColumns = columns;
+      this.noiseRows = rows;
+    }
+    this.noiseFrame = frame;
+
+    const data = this.noiseData;
+    let offset = 0;
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < columns; x += 1, offset += 4) {
+        data[offset] = hash(x, y, frame) * 255;
+        // The blue-noise algorithm averages a fixed pair of hashes per cell.
+        data[offset + 1] =
+          ((hash(x, y, 17) + hash(x + 7, y + 13, 41)) * 0.5) * 255;
+      }
+    }
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.noiseTexture);
+    if (resized) {
+      gl.texImage2D(
+        gl.TEXTURE_2D, 0, gl.RGBA, columns, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, data
+      );
+    } else {
+      gl.texSubImage2D(
+        gl.TEXTURE_2D, 0, 0, 0, columns, rows, gl.RGBA, gl.UNSIGNED_BYTE, data
+      );
+    }
+    gl.activeTexture(gl.TEXTURE0);
   }
 
   private drawRect(
