@@ -42,6 +42,15 @@ uniform sampler2D u_palette;
 uniform float u_paletteCount;
 uniform float u_paletteMix;
 uniform bool u_foregroundTransparent;
+// Luminance mask. White reveals, black hides; the Canvas renderer fills the
+// mask sample canvas with black first, so anything outside the mask hides too.
+uniform sampler2D u_mask;
+uniform vec4 u_maskRect;
+uniform bool u_maskActive;
+uniform bool u_maskInvert;
+uniform float u_maskThreshold;
+uniform float u_maskFeather;
+uniform float u_maskProgress;
 uniform vec2 u_cssSize;
 uniform vec2 u_gridSize;
 uniform vec4 u_drawRect;
@@ -177,9 +186,23 @@ float revealForCell(vec2 cell) {
   return 1.0 - pow(1.0 - local, 3.0);
 }
 
+float maskAlpha(vec2 cell) {
+  if (!u_maskActive) return 1.0;
+  vec2 uv = ((cell + 0.5) * u_cellSize - u_maskRect.xy) / u_maskRect.zw;
+  float value = 0.0;
+  if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
+    value = clamp(luminance(texture2D(u_mask, uv).rgb), 0.0, 1.0);
+  }
+  if (u_maskInvert) value = 1.0 - value;
+  float alpha = u_maskThreshold <= 0.0
+    ? value
+    : clamp((value - u_maskThreshold) / u_maskFeather, 0.0, 1.0);
+  return alpha * clamp(u_maskProgress, 0.0, 1.0);
+}
+
 // Tone, noise and dither for one cell. Returns false when the cell samples
 // outside the drawn source rectangle.
-bool cellValue(vec2 cell, out float dithered, out float toned, out vec3 rgb) {
+bool cellValue(vec2 cell, out float dithered, out float toned, out vec3 rgb, out float mask) {
   vec2 center = (cell + 0.5) * u_cellSize;
   vec2 sourceUv = (center - u_drawRect.xy) / u_drawRect.zw;
   if (sourceUv.x < 0.0 || sourceUv.x > 1.0 || sourceUv.y < 0.0 || sourceUv.y > 1.0) {
@@ -194,8 +217,10 @@ bool cellValue(vec2 cell, out float dithered, out float toned, out vec3 rgb) {
   if (u_invert) value = 1.0 - value;
   value = clamp(value + (noise.x - 0.5) * u_noiseAmount, 0.0, 1.0);
   float binary = value >= localThreshold(cell, u_threshold, noise) ? 1.0 : 0.0;
-  dithered = mix(value, binary, u_ditherAmount);
-  // Displacement keys off the sampled tone, not the dithered result.
+  // Canvas applies the mask to the dithered value only; the sampled tone that
+  // drives displacement and hybrid selection stays untouched.
+  mask = maskAlpha(cell);
+  dithered = mix(value, binary, u_ditherAmount) * mask;
   toned = value;
   return true;
 }
@@ -258,8 +283,10 @@ float primitiveCoverage(
   }
   float dithered;
   float toned;
-  if (!cellValue(cell, dithered, toned, rgb)) return 0.0;
-  float reveal = revealForCell(cell);
+  float mask;
+  if (!cellValue(cell, dithered, toned, rgb, mask)) return 0.0;
+  if (mask <= 0.0) return 0.0;
+  float reveal = revealForCell(cell) * mask;
   if (reveal <= 0.0) return 0.0;
 
   outToned = toned;
@@ -339,8 +366,9 @@ void main() {
   if (u_mode == 0) {
     float dithered;
     float toned;
+    float mask;
     vec3 rgb;
-    if (!cellValue(cell, dithered, toned, rgb)) {
+    if (!cellValue(cell, dithered, toned, rgb, mask)) {
       gl_FragColor = background;
       return;
     }
@@ -493,6 +521,13 @@ interface WebGLUniforms {
   paletteCount: WebGLUniformLocation;
   paletteMix: WebGLUniformLocation;
   foregroundTransparent: WebGLUniformLocation;
+  mask: WebGLUniformLocation;
+  maskRect: WebGLUniformLocation;
+  maskActive: WebGLUniformLocation;
+  maskInvert: WebGLUniformLocation;
+  maskThreshold: WebGLUniformLocation;
+  maskFeather: WebGLUniformLocation;
+  maskProgress: WebGLUniformLocation;
   primitiveMix: WebGLUniformLocation;
   stagger: WebGLUniformLocation;
   cssSize: WebGLUniformLocation;
@@ -644,7 +679,8 @@ export class WebGLRenderer implements DitherRenderer {
   static fallbackReason(
     options: AgencyDitherOptions,
     secondary?: SourceFrame | null,
-    mask?: SourceFrame | null
+    // Masks are handled in the shader now; the parameter stays for callers.
+    _mask?: SourceFrame | null
   ): string {
     // Every message is interned. This runs twice per frame for each instance on
     // the Canvas fallback, so building template strings here littered the heap.
@@ -663,7 +699,6 @@ export class WebGLRenderer implements DitherRenderer {
     if (secondary?.ready && options.sourceMix > 0) {
       return 'Secondary-source blending requires the Canvas renderer';
     }
-    if (mask?.ready) return 'Masks require the Canvas renderer';
     if (options.toneMap.length) return 'Tone maps require the Canvas renderer';
     if (options.palette.length > PALETTE_LIMIT) {
       return `Palettes over ${PALETTE_LIMIT} colours require the Canvas renderer`;
@@ -691,6 +726,8 @@ export class WebGLRenderer implements DitherRenderer {
   private noiseTexture!: WebGLTexture;
   private glyphTexture!: WebGLTexture;
   private paletteTexture!: WebGLTexture;
+  private maskTexture!: WebGLTexture;
+  private uploadedMask: SourceFrame | null = null;
   private paletteKey = '';
   private glyphKey = '';
   private glyphCount = 1;
@@ -776,7 +813,11 @@ export class WebGLRenderer implements DitherRenderer {
     this.paletteTexture = gl.createTexture() ?? (() => {
       throw new Error('AgencyDitherFX could not create a WebGL texture.');
     })();
+    this.maskTexture = gl.createTexture() ?? (() => {
+      throw new Error('AgencyDitherFX could not create a WebGL texture.');
+    })();
     this.paletteKey = '';
+    this.uploadedMask = null;
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
     this.glyphKey = '';
     this.glyphReady = false;
@@ -795,6 +836,13 @@ export class WebGLRenderer implements DitherRenderer {
       paletteCount: getUniform(gl, this.program, 'u_paletteCount'),
       paletteMix: getUniform(gl, this.program, 'u_paletteMix'),
       foregroundTransparent: getUniform(gl, this.program, 'u_foregroundTransparent'),
+      mask: getUniform(gl, this.program, 'u_mask'),
+      maskRect: getUniform(gl, this.program, 'u_maskRect'),
+      maskActive: getUniform(gl, this.program, 'u_maskActive'),
+      maskInvert: getUniform(gl, this.program, 'u_maskInvert'),
+      maskThreshold: getUniform(gl, this.program, 'u_maskThreshold'),
+      maskFeather: getUniform(gl, this.program, 'u_maskFeather'),
+      maskProgress: getUniform(gl, this.program, 'u_maskProgress'),
       primitiveMix: getUniform(gl, this.program, 'u_primitiveMix'),
       stagger: getUniform(gl, this.program, 'u_stagger'),
       cssSize: getUniform(gl, this.program, 'u_cssSize'),
@@ -911,6 +959,7 @@ export class WebGLRenderer implements DitherRenderer {
       this.gl.deleteTexture(this.noiseTexture);
       this.gl.deleteTexture(this.glyphTexture);
       this.gl.deleteTexture(this.paletteTexture);
+      this.gl.deleteTexture(this.maskTexture);
       this.gl.deleteProgram(this.program);
       // Frees the backing context immediately instead of waiting for GC, which
       // matters when instances are created and torn down across route changes.
@@ -991,6 +1040,7 @@ export class WebGLRenderer implements DitherRenderer {
       options.foregroundTransparent ? 1 : 0
     );
     gl.uniform1f(this.uniforms.primitiveMix, options.primitiveMix);
+    this.updateMask(options, mask);
 
     const [drawX, drawY, drawWidth, drawHeight] = this.drawRect(source, options);
     const foreground = rgba(options.foreground);
@@ -1002,6 +1052,7 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1i(this.uniforms.noise, 1);
     gl.uniform1i(this.uniforms.glyphAtlas, 2);
     gl.uniform1i(this.uniforms.palette, 3);
+    gl.uniform1i(this.uniforms.mask, 4);
     gl.uniform2f(this.uniforms.cssSize, this.cssWidth, this.cssHeight);
     gl.uniform2f(this.uniforms.gridSize, this.columns, this.rows);
     gl.uniform4f(this.uniforms.drawRect, drawX, drawY, drawWidth, drawHeight);
@@ -1212,6 +1263,48 @@ export class WebGLRenderer implements DitherRenderer {
     return true;
   }
 
+  /** Uploads the mask and publishes its placement and threshold uniforms. */
+  private updateMask(
+    options: AgencyDitherOptions,
+    mask: SourceFrame | null | undefined
+  ): void {
+    const gl = this.gl;
+    const active = Boolean(mask?.ready);
+    gl.uniform1i(this.uniforms.maskActive, active ? 1 : 0);
+    if (!active || !mask) {
+      this.uploadedMask = null;
+      return;
+    }
+
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.maskTexture);
+    if (mask.dynamic || this.uploadedMask !== mask) {
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texImage2D(
+        gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE,
+        mask.drawable as TexImageSource
+      );
+      this.uploadedMask = mask;
+    }
+    gl.activeTexture(gl.TEXTURE0);
+
+    const rect = this.placementRect(
+      mask,
+      options.maskFit,
+      options.maskScale,
+      options.maskPositionX,
+      options.maskPositionY
+    );
+    gl.uniform4f(this.uniforms.maskRect, rect[0], rect[1], rect[2], rect[3]);
+    gl.uniform1i(this.uniforms.maskInvert, options.maskInvert ? 1 : 0);
+    gl.uniform1f(this.uniforms.maskThreshold, clamp(options.maskThreshold));
+    gl.uniform1f(this.uniforms.maskFeather, Math.max(0.001, options.maskFeather));
+    gl.uniform1f(this.uniforms.maskProgress, clamp(options.maskProgress));
+  }
+
   /** Uploads the palette as a 1 x PALETTE_LIMIT strip when it changes. */
   private updatePalette(options: AgencyDitherOptions): void {
     const key = options.palette.join(',');
@@ -1239,21 +1332,38 @@ export class WebGLRenderer implements DitherRenderer {
     source: SourceFrame,
     options: AgencyDitherOptions
   ): [number, number, number, number] {
-    const fit = options.fit === 'stretch' ? 'fill' : options.fit;
+    return this.placementRect(source, options.fit, 1, 0.5, 0.5);
+  }
+
+  /**
+   * The rectangle a source is drawn into, in CSS pixels. Mirrors the placement
+   * the Canvas renderer computes on its sample grid; the two spaces are
+   * proportional, so the result is the same.
+   */
+  private placementRect(
+    source: SourceFrame,
+    requestedFit: AgencyDitherOptions['fit'],
+    scale: number,
+    positionX: number,
+    positionY: number
+  ): [number, number, number, number] {
+    const fit = requestedFit === 'stretch' ? 'fill' : requestedFit;
     let width = this.cssWidth;
     let height = this.cssHeight;
     if (fit === 'cover' || fit === 'contain') {
-      const scale = fit === 'cover'
+      const fitScale = fit === 'cover'
         ? Math.max(this.cssWidth / source.width, this.cssHeight / source.height)
         : Math.min(this.cssWidth / source.width, this.cssHeight / source.height);
-      width = source.width * scale;
-      height = source.height * scale;
+      width = source.width * fitScale;
+      height = source.height * fitScale;
     } else if (fit === 'none') {
       width = source.width;
       height = source.height;
     }
-    const x = (this.cssWidth - width) * 0.5;
-    const y = (this.cssHeight - height) * 0.5;
+    width *= scale;
+    height *= scale;
+    const x = (this.cssWidth - width) * clamp(positionX);
+    const y = (this.cssHeight - height) * clamp(positionY);
     return [x, y, width, height];
   }
 

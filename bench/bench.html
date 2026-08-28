@@ -58,6 +58,25 @@
         img.src = makeSmooth(960, 540).toDataURL('image/png');
       });
 
+      function makeMask(w, h) {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, w, h);
+        const g = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w * 0.45);
+        g.addColorStop(0, '#ffffff');
+        g.addColorStop(1, '#000000');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+        return c;
+      }
+      const MASK_SOURCE = await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.src = makeMask(960, 540).toDataURL('image/png');
+      });
+
       const PATTERN = makePattern(960, 540);
       const STATIC_SOURCE = await new Promise((resolve) => {
         const img = new Image();
@@ -117,7 +136,9 @@
         { id: 'rotation-video',         dynamic: true,  opts: { mode: 'blocks', rotation: 30 } },
         { id: 'gl-ascii-video',         dynamic: true,  opts: { mode: 'ascii', renderer: 'webgl' } },
         { id: 'gl-hybrid-video',        dynamic: true,  opts: { mode: 'hybrid', renderer: 'webgl' } },
-        { id: 'gl-palette-video',       dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', colorMode: 'palette' } }
+        { id: 'gl-palette-video',       dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', colorMode: 'palette' } },
+        { id: 'gl-mask-video',          dynamic: true,  mask: true, opts: { mode: 'dots', renderer: 'webgl' } },
+        { id: 'mask-video',             dynamic: true,  mask: true, opts: { mode: 'dots' } }
       ];
 
       const median = (a) => {
@@ -145,6 +166,7 @@
         const fx = new Lib.AgencyDitherFX(host, { ...BASE, ...scenario.opts });
         try {
           await fx.setSource(scenario.dynamic ? DYNAMIC_SOURCE : STATIC_SOURCE);
+          if (scenario.mask) await fx.setMaskSource(MASK_SOURCE);
           fx.stop();
 
           // warmup: JIT + first-frame allocations
@@ -425,7 +447,10 @@
           { id: 'hybrid',           opts: { mode: 'hybrid', noiseAmount: 0 } },
           { id: 'color-source',     opts: { mode: 'dots', noiseAmount: 0, colorMode: 'source' } },
           { id: 'color-palette',    opts: { mode: 'dots', noiseAmount: 0, colorMode: 'palette' } },
-          { id: 'color-brightness', opts: { mode: 'dots', noiseAmount: 0, colorMode: 'brightness' } }
+          { id: 'color-brightness', opts: { mode: 'dots', noiseAmount: 0, colorMode: 'brightness' } },
+          { id: 'mask-plain',   mask: true, opts: { mode: 'dots', noiseAmount: 0 } },
+          { id: 'mask-feather', mask: true, opts: { mode: 'dots', noiseAmount: 0, maskThreshold: 0.35, maskFeather: 0.12 } },
+          { id: 'mask-invert',  mask: true, opts: { mode: 'dots', noiseAmount: 0, maskInvert: true, maskProgress: 0.8 } }
         ];
         const out = [];
         for (const cfg of CONFIGS) {
@@ -437,6 +462,7 @@
             });
             try {
               await fx.setSource(cfg.smooth ? SMOOTH_SOURCE : STATIC_SOURCE);
+            if (cfg.mask) await fx.setMaskSource(MASK_SOURCE);
               fx.stop();
               fx.render(4000);
               const w = fx.canvas.width, h = fx.canvas.height;

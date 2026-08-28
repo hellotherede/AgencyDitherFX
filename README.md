@@ -42,10 +42,10 @@ Not implemented yet:
 - Full WebGL feature parity. The `webgl` renderer is the default and covers
   every mode except `symbols`, all four colour modes, and the realtime-safe
   algorithms, including rotation, displacement, click ripple, pointer push, and
-  the drift, wave, orbit and pulse ambient modes. Symbols, error diffusion,
-  masks, secondary-source blending, tone maps, source blur, random glyph
-  selection, glyph scramble and jitter ambient motion automatically use the
-  Canvas renderer so the requested effect remains visually correct.
+  the drift, wave, orbit and pulse ambient modes, and luminance masks. Symbols,
+  error diffusion, secondary-source blending, tone maps, source blur, random
+  glyph selection, glyph scramble and jitter ambient motion automatically use
+  the Canvas renderer so the requested effect remains visually correct.
 - CPU error diffusion is throttled, but not moved into a Web Worker yet; the
   `worker` flag is reserved and defaults to `false`
 - Automated browser and visual-regression tests
@@ -839,6 +839,7 @@ own cell:
 | ASCII                        |  24 fps | 181 fps |
 | Hybrid                       |  34 fps | 181 fps |
 | Nearest-palette colour       |  25 fps | 181 fps |
+| Luminance mask               |  32 fps | 181 fps |
 
 The neighbourhood search costs about 0.3 ms and is switched off entirely when no
 motion is active.
