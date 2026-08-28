@@ -646,6 +646,13 @@
         return result;
       };
 
+      window.__precision = () => {
+        const gl = document.createElement('canvas').getContext('webgl');
+        const f = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+        const m = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.MEDIUM_FLOAT);
+        return { highpSupported: f.precision > 0, highpBits: f.precision, mediumBits: m.precision };
+      };
+
       window.__diag = async () => {
         {
           const Lib = await import('./lib-optimized.js');

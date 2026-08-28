@@ -169,6 +169,12 @@ if (args.includes('--diag')) {
   await rm(profile, { recursive: true, force: true }).catch(() => {});
   process.exit(0);
 }
+if (args.includes('--precision')) {
+  console.log(JSON.stringify(await evaluate('window.__precision()')));
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(0);
+}
 if (args.includes('--micro')) {
   const rows = await evaluate('window.__micro()');
   console.log('\nmain-thread CPU cost of one WebGL frame');

@@ -19,7 +19,11 @@ void main() {
 `;
 
 const FRAGMENT_SHADER = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 
 #define PALETTE_LIMIT 16.0
 #define TONE_BANDS 7
@@ -57,10 +61,10 @@ uniform float u_symbolCount;
 // already in use. A loop index is a constant-index-expression, so indexing these
 // inside a fixed-bound loop is legal in GLSL ES 1.00.
 uniform int u_bandCount;
-uniform float u_bandTime;
 // x = min, y = max, z = primitive id, w = scale
 uniform vec4 u_bandRange[TONE_BANDS];
-// x = rotation, y = revealOffset, z = motionAmount, w = motionSpeed
+// x = rotation, y = revealOffset, z = motionAmount, w = drift phase already
+// reduced to one turn
 uniform vec4 u_bandStyle[TONE_BANDS];
 // x = offsetX, y = offsetY, z = symbol index, w = 1 when the band sets a colour
 uniform vec4 u_bandPlacement[TONE_BANDS];
@@ -89,6 +93,9 @@ uniform float u_sourceMix;
 uniform bool u_secondaryActive;
 uniform vec2 u_cssSize;
 uniform vec2 u_gridSize;
+// x = columns / (cells - 1), y = 1 / (cells - 1). Precomputed so the shader
+// never forms the cell index itself.
+uniform vec2 u_orderScale;
 uniform vec4 u_drawRect;
 uniform vec2 u_cellSize;
 uniform vec2 u_pixel;
@@ -122,7 +129,8 @@ uniform float u_displacePhase;
 uniform int u_ambientMode;
 uniform float u_ambientAmount;
 uniform float u_ambientFrequency;
-uniform float u_ambientElapsed;
+// x = elapsed, y = elapsed * 2, z = elapsed * 0.83, each already wrapped.
+uniform vec3 u_ambientPhase;
 uniform vec3 u_mouse;
 uniform vec4 u_ripple;
 
@@ -186,8 +194,7 @@ float revealForCell(vec2 cell, float revealOffset) {
 
   vec2 denom = max(u_gridSize - 1.0, vec2(1.0));
   vec2 n = cell / denom;
-  float order = (cell.y * u_gridSize.x + cell.x) /
-    max(1.0, u_gridSize.x * u_gridSize.y - 1.0);
+  float order = cell.y * u_orderScale.x + cell.x * u_orderScale.y;
 
   if (u_staggerFrom == 1) {
     order = min(1.0, distance(n, vec2(0.5)) / 0.70710678);
@@ -309,7 +316,7 @@ vec2 cellPosition(
   if (banded) {
     pos += placement.xy * u_cellSize;
     if (style.z > 0.0) {
-      float phase = u_bandTime * style.w + cell.x * 0.19 + cell.y * 0.11;
+      float phase = style.w + cell.x * 0.19 + cell.y * 0.11;
       pos.x += cos(phase) * style.z * u_cellSize.x;
       pos.y += sin(phase * 0.83) * style.z * u_cellSize.y;
     }
@@ -318,19 +325,19 @@ vec2 cellPosition(
   if (u_ambientAmount > 0.0) {
     float spatial = (cell.x + cell.y * 0.73) * u_ambientFrequency;
     if (u_ambientMode == 1) {
-      pos.y += sin(u_ambientElapsed * 2.0 + cell.x * u_ambientFrequency) *
+      pos.y += sin(u_ambientPhase.y + cell.x * u_ambientFrequency) *
         u_ambientAmount * u_cellSize.y;
     } else if (u_ambientMode == 2) {
-      float angle = u_ambientElapsed + spatial;
+      float angle = u_ambientPhase.x + spatial;
       pos += vec2(cos(angle), sin(angle)) * u_ambientAmount * u_cellSize;
     } else if (u_ambientMode == 3) {
-      ambientScale = 1.0 + sin(u_ambientElapsed * 2.0 + spatial) * u_ambientAmount * 0.35;
+      ambientScale = 1.0 + sin(u_ambientPhase.y + spatial) * u_ambientAmount * 0.35;
     } else if (u_ambientMode == 4) {
       vec4 data = texture2D(u_cellData, (cell + 0.5) / u_gridSize);
       pos += (data.gb - 0.5) * u_ambientAmount * u_cellSize;
     } else {
-      pos.x += cos(u_ambientElapsed + spatial) * u_ambientAmount * u_cellSize.x;
-      pos.y += sin(u_ambientElapsed * 0.83 + spatial) * u_ambientAmount * u_cellSize.y;
+      pos.x += cos(u_ambientPhase.x + spatial) * u_ambientAmount * u_cellSize.x;
+      pos.y += sin(u_ambientPhase.z + spatial) * u_ambientAmount * u_cellSize.y;
     }
   }
 
@@ -664,6 +671,8 @@ const PRIMITIVES: Record<string, number> = {
   line: 5
 };
 
+const TAU = Math.PI * 2;
+
 const SUFFIX = ' requires the Canvas renderer';
 const UNSUPPORTED_MODE = `This mode${SUFFIX}`;
 const UNSUPPORTED_ALGORITHM = `This algorithm${SUFFIX}`;
@@ -721,7 +730,6 @@ interface WebGLUniforms {
   symbolScale: WebGLUniformLocation;
   symbolCount: WebGLUniformLocation;
   bandCount: WebGLUniformLocation;
-  bandTime: WebGLUniformLocation;
   bandRange: WebGLUniformLocation;
   bandStyle: WebGLUniformLocation;
   bandPlacement: WebGLUniformLocation;
@@ -772,7 +780,8 @@ interface WebGLUniforms {
   ambientMode: WebGLUniformLocation;
   ambientAmount: WebGLUniformLocation;
   ambientFrequency: WebGLUniformLocation;
-  ambientElapsed: WebGLUniformLocation;
+  ambientPhase: WebGLUniformLocation;
+  orderScale: WebGLUniformLocation;
   mouse: WebGLUniformLocation;
   ripple: WebGLUniformLocation;
 }
@@ -943,6 +952,7 @@ export class WebGLRenderer implements DitherRenderer {
   private readonly bandStyle = new Float32Array(TONE_BANDS * 4);
   private readonly bandPlacement = new Float32Array(TONE_BANDS * 4);
   private readonly bandColor = new Float32Array(TONE_BANDS * 4);
+  private readonly bandSpeed = new Float32Array(TONE_BANDS);
   private symbolReady = false;
   private cellData = new Uint8Array(0);
   private cellDataKey = '';
@@ -1079,7 +1089,6 @@ export class WebGLRenderer implements DitherRenderer {
       symbolScale: getUniform(gl, this.program, 'u_symbolScale'),
       symbolCount: getUniform(gl, this.program, 'u_symbolCount'),
       bandCount: getUniform(gl, this.program, 'u_bandCount'),
-      bandTime: getUniform(gl, this.program, 'u_bandTime'),
       bandRange: getUniform(gl, this.program, 'u_bandRange[0]'),
       bandStyle: getUniform(gl, this.program, 'u_bandStyle[0]'),
       bandPlacement: getUniform(gl, this.program, 'u_bandPlacement[0]'),
@@ -1130,7 +1139,8 @@ export class WebGLRenderer implements DitherRenderer {
       ambientMode: getUniform(gl, this.program, 'u_ambientMode'),
       ambientAmount: getUniform(gl, this.program, 'u_ambientAmount'),
       ambientFrequency: getUniform(gl, this.program, 'u_ambientFrequency'),
-      ambientElapsed: getUniform(gl, this.program, 'u_ambientElapsed'),
+      ambientPhase: getUniform(gl, this.program, 'u_ambientPhase'),
+      orderScale: getUniform(gl, this.program, 'u_orderScale'),
       mouse: getUniform(gl, this.program, 'u_mouse'),
       ripple: getUniform(gl, this.program, 'u_ripple')
     };
@@ -1405,6 +1415,12 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1i(this.uniforms.symbol, 7);
     gl.uniform2f(this.uniforms.cssSize, this.cssWidth, this.cssHeight);
     gl.uniform2f(this.uniforms.gridSize, this.columns, this.rows);
+    const orderTotal = Math.max(1, this.columns * this.rows - 1);
+    gl.uniform2f(
+      this.uniforms.orderScale,
+      this.columns / orderTotal,
+      1 / orderTotal
+    );
     gl.uniform4f(this.uniforms.drawRect, drawX, drawY, drawWidth, drawHeight);
     gl.uniform2f(this.uniforms.cellSize, this.cellWidth, this.cellHeight);
     // CSS units covered by one device pixel: the width of the antialiased edge.
@@ -1469,14 +1485,20 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1i(this.uniforms.neighborhood, moves ? 1 : 0);
     gl.uniform1f(this.uniforms.rotation, options.rotation * Math.PI / 180);
     gl.uniform1f(this.uniforms.displacement, options.displacement);
-    gl.uniform1f(this.uniforms.displacePhase, time * 0.0004);
+    gl.uniform1f(this.uniforms.displacePhase, (time * 0.0004) % TAU);
     gl.uniform1i(this.uniforms.ambientMode, AMBIENT[options.ambientMode] ?? 0);
     gl.uniform1f(this.uniforms.ambientAmount, ambientAmount);
     gl.uniform1f(
       this.uniforms.ambientFrequency,
       Math.max(0.001, options.ambientFrequency)
     );
-    gl.uniform1f(this.uniforms.ambientElapsed, time * 0.001 * options.ambientSpeed);
+    const elapsed = time * 0.001 * options.ambientSpeed;
+    gl.uniform3f(
+      this.uniforms.ambientPhase,
+      elapsed % TAU,
+      (elapsed * 2) % TAU,
+      (elapsed * 0.83) % TAU
+    );
     gl.uniform3f(this.uniforms.mouse, pointer.x, pointer.y, mouseInfluence);
     gl.uniform4f(
       this.uniforms.ripple,
@@ -1709,7 +1731,6 @@ export class WebGLRenderer implements DitherRenderer {
     const gl = this.gl;
     const bands = options.toneMap.slice(0, TONE_BANDS);
     gl.uniform1i(this.uniforms.bandCount, bands.length);
-    gl.uniform1f(this.uniforms.bandTime, time * 0.001);
     if (!bands.length) return;
 
     if (
@@ -1732,7 +1753,7 @@ export class WebGLRenderer implements DitherRenderer {
         style[slot] = (band.rotation ?? 0) * Math.PI / 180;
         style[slot + 1] = band.revealOffset ?? 0;
         style[slot + 2] = band.motionAmount ?? 0;
-        style[slot + 3] = band.motionSpeed ?? 1;
+        this.bandSpeed[index] = band.motionSpeed ?? 1;
         placement[slot] = band.offsetX ?? 0;
         placement[slot + 1] = band.offsetY ?? 0;
         placement[slot + 2] = this.symbolIndex(band.symbol);
@@ -1743,6 +1764,12 @@ export class WebGLRenderer implements DitherRenderer {
         color[slot + 2] = b;
         color[slot + 3] = 1;
       }
+    }
+
+    // Refreshed every frame, unlike the rest of the packed data.
+    const seconds = time * 0.001;
+    for (let index = 0; index < bands.length; index += 1) {
+      this.bandStyle[index * 4 + 3] = (seconds * this.bandSpeed[index]!) % TAU;
     }
 
     gl.uniform4fv(this.uniforms.bandRange, this.bandRange);

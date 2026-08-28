@@ -879,6 +879,27 @@ measuring — do not reintroduce them:
   ~3× slower than `fillText`, which already goes through Skia's own internal GPU
   glyph atlas.
 
+### Shader precision
+
+Desktop drivers quietly promote `mediump` to 32-bit floats — this machine's
+reports 23 bits of mantissa for both `mediump` and `highp` — so precision
+problems are invisible during development and only appear on phones, where
+`mediump` is a real 16-bit float exact only to 2048.
+
+The shader asks for `highp` where `GL_FRAGMENT_PRECISION_HIGH` is defined, which
+covers every WebGL-capable GPU of the last decade, and falls back to `mediump`
+otherwise. Two things are also restructured so they hold up either way:
+
+- The stagger order is built from two pre-scaled terms rather than by forming a
+  cell index and dividing, which at 100,000 cells produced an intermediate far
+  outside 16-bit range and stepped the reveal.
+- Every phase fed to `sin` or `cos` is reduced to one turn on the CPU before
+  upload, per band where each band has its own speed. Elapsed time otherwise
+  grows without bound and costs precision on any hardware in a long session.
+
+Very wide canvases still need `highp`: a coordinate past 2048 cannot be
+represented exactly in a 16-bit float, so cells would land on the wrong pixel.
+
 ### WebGL context budget
 
 Browsers drop the oldest live WebGL context once a page exceeds their limit
