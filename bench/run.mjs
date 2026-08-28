@@ -160,6 +160,13 @@ if (args.includes('--noise')) {
   await rm(profile, { recursive: true, force: true }).catch(() => {});
   process.exit(0);
 }
+if (args.includes('--diag')) {
+  const rows = await evaluate('window.__diag()');
+  for (const row of rows) console.log(JSON.stringify(row));
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(0);
+}
 if (RENDERERS) {
   const rows = await evaluate('window.__renderers()');
   console.log('\nCanvas vs WebGL on identical config (luminance delta, 0-255)');
@@ -251,7 +258,8 @@ if (hasB) {
       pad(id, 24) + pad(a.cells, 8) +
       num(a.flushedMs, 10) + num(b.flushedMs, 12) +
       num(a.capableFps, 15, 1) + num(b.capableFps, 13, 1) +
-      num(a.flushedMs / b.flushedMs, 14, 2) + 'x'
+      num(a.flushedMs / b.flushedMs, 14, 2) + 'x' +
+      (b.renderer !== a.renderer || b.warning ? `   [${b.renderer}${b.warning ? ': ' + b.warning : ''}]` : '')
     );
   }
   console.log('\nlive rAF fps (vsync-bound) and phase breakdown (median ms):');

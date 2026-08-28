@@ -138,7 +138,9 @@
         { id: 'gl-hybrid-video',        dynamic: true,  opts: { mode: 'hybrid', renderer: 'webgl' } },
         { id: 'gl-palette-video',       dynamic: true,  opts: { mode: 'dots', renderer: 'webgl', colorMode: 'palette' } },
         { id: 'gl-mask-video',          dynamic: true,  mask: true, opts: { mode: 'dots', renderer: 'webgl' } },
-        { id: 'mask-video',             dynamic: true,  mask: true, opts: { mode: 'dots' } }
+        { id: 'mask-video',             dynamic: true,  mask: true, opts: { mode: 'dots' } },
+        { id: 'gl-mix-video',           dynamic: true,  secondary: true, opts: { mode: 'dots', renderer: 'webgl', sourceMix: 0.5 } },
+        { id: 'mix-video',              dynamic: true,  secondary: true, opts: { mode: 'dots', sourceMix: 0.5 } }
       ];
 
       const median = (a) => {
@@ -167,6 +169,7 @@
         try {
           await fx.setSource(scenario.dynamic ? DYNAMIC_SOURCE : STATIC_SOURCE);
           if (scenario.mask) await fx.setMaskSource(MASK_SOURCE);
+          if (scenario.secondary) await fx.setSecondarySource(SMOOTH_SOURCE);
           fx.stop();
 
           // warmup: JIT + first-frame allocations
@@ -450,7 +453,12 @@
           { id: 'color-brightness', opts: { mode: 'dots', noiseAmount: 0, colorMode: 'brightness' } },
           { id: 'mask-plain',   mask: true, opts: { mode: 'dots', noiseAmount: 0 } },
           { id: 'mask-feather', mask: true, opts: { mode: 'dots', noiseAmount: 0, maskThreshold: 0.35, maskFeather: 0.12 } },
-          { id: 'mask-invert',  mask: true, opts: { mode: 'dots', noiseAmount: 0, maskInvert: true, maskProgress: 0.8 } }
+          { id: 'mask-invert',  mask: true, opts: { mode: 'dots', noiseAmount: 0, maskInvert: true, maskProgress: 0.8 } },
+          { id: 'mix-half',  secondary: true, opts: { mode: 'dots', noiseAmount: 0, sourceMix: 0.5 } },
+          { id: 'mix-full',  secondary: true, opts: { mode: 'dots', noiseAmount: 0, sourceMix: 1 } },
+          // 'contain' leaves letterboxing, which Canvas fills with the background
+          // colour and then dithers like any other cell.
+          { id: 'contain-fit', opts: { mode: 'dots', noiseAmount: 0, fit: 'contain' } }
         ];
         const out = [];
         for (const cfg of CONFIGS) {
@@ -463,6 +471,7 @@
             try {
               await fx.setSource(cfg.smooth ? SMOOTH_SOURCE : STATIC_SOURCE);
             if (cfg.mask) await fx.setMaskSource(MASK_SOURCE);
+            if (cfg.secondary) await fx.setSecondarySource(SMOOTH_SOURCE);
               fx.stop();
               fx.render(4000);
               const w = fx.canvas.width, h = fx.canvas.height;
@@ -583,6 +592,30 @@
           host.remove();
         }
         return result;
+      };
+
+      window.__diag = async () => {
+        const Lib = await import('./lib-optimized.js');
+        const out = [];
+        for (const cfg of [
+          { id: 'plain', secondary: false },
+          { id: 'secondary', secondary: true }
+        ]) {
+          const host = await makeHost();
+          const fx = new Lib.AgencyDitherFX(host, {
+            ...BASE, mode: 'dots', renderer: 'webgl', immediate: true, sourceMix: 0.5
+          });
+          try {
+            await fx.setSource(DYNAMIC_SOURCE);
+            if (cfg.secondary) await fx.setSecondarySource(SMOOTH_SOURCE);
+            fx.render(1000);
+            const st = fx.getStats();
+            out.push({ id: cfg.id, renderer: st.renderer, warning: st.warning });
+          } catch (e) {
+            out.push({ id: cfg.id, error: String(e && e.message || e) });
+          } finally { fx.destroy(); host.remove(); }
+        }
+        return out;
       };
 
       document.getElementById('log').textContent = 'ready';

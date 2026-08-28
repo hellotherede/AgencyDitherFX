@@ -40,16 +40,22 @@ Production-ready today:
 Not implemented yet:
 
 - Full WebGL feature parity. The `webgl` renderer is the default and covers
-  every mode except `symbols`, all four colour modes, and the realtime-safe
-  algorithms, including rotation, displacement, click ripple, pointer push, and
-  the drift, wave, orbit and pulse ambient modes, and luminance masks. Symbols,
-  error diffusion, secondary-source blending, tone maps, source blur, random
-  glyph selection, glyph scramble and jitter ambient motion automatically use
-  the Canvas renderer so the requested effect remains visually correct.
+  every mode except `symbols`, all four colour modes, the realtime-safe
+  algorithms, luminance masks, secondary-source blending, and every motion
+  control except jitter. What still selects Canvas automatically, reporting the
+  reason through `warning`:
+
+  | Feature                                | Why |
+  | -------------------------------------- | --- |
+  | Error diffusion                        | Each pixel depends on its predecessors; a fragment shader cannot express it |
+  | Symbols                                | Needs a symbol atlas, the same shape as the glyph atlas |
+  | Tone maps                              | Per-band primitive, colour, scale, offset and motion |
+  | Source blur                            | Needs a separate blur pass |
+  | Random glyphs, glyph scramble, jitter  | Need the integer hash GLSL ES 1.00 cannot express |
+  | Palettes over 16 colours               | The palette texture is 16 wide |
 - CPU error diffusion is throttled, but not moved into a Web Worker yet; the
   `worker` flag is reserved and defaults to `false`
 - Automated browser and visual-regression tests
-- GPU glyph atlases for very dense full-screen ASCII video
 
 Those are meaningful next steps for shader-heavy installations, but they are
 not required for ordinary hero sections, cards, editorial modules, or
@@ -840,6 +846,7 @@ own cell:
 | Hybrid                       |  34 fps | 181 fps |
 | Nearest-palette colour       |  25 fps | 181 fps |
 | Luminance mask               |  32 fps | 181 fps |
+| Two-source blend             |  39 fps | 181 fps |
 
 The neighbourhood search costs about 0.3 ms and is switched off entirely when no
 motion is active.

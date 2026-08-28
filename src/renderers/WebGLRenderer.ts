@@ -51,6 +51,12 @@ uniform bool u_maskInvert;
 uniform float u_maskThreshold;
 uniform float u_maskFeather;
 uniform float u_maskProgress;
+// Second source, cross-faded with the first by sourceMix. Canvas tones each
+// source separately and blends the results, so the shader does the same.
+uniform sampler2D u_secondary;
+uniform vec4 u_secondaryRect;
+uniform float u_sourceMix;
+uniform bool u_secondaryActive;
 uniform vec2 u_cssSize;
 uniform vec2 u_gridSize;
 uniform vec4 u_drawRect;
@@ -202,20 +208,32 @@ float maskAlpha(vec2 cell) {
 
 // Tone, noise and dither for one cell. Returns false when the cell samples
 // outside the drawn source rectangle.
-bool cellValue(vec2 cell, out float dithered, out float toned, out vec3 rgb, out float mask) {
-  vec2 center = (cell + 0.5) * u_cellSize;
-  vec2 sourceUv = (center - u_drawRect.xy) / u_drawRect.zw;
-  if (sourceUv.x < 0.0 || sourceUv.x > 1.0 || sourceUv.y < 0.0 || sourceUv.y > 1.0) {
-    return false;
-  }
-  vec2 noise = texture2D(u_noise, (cell + 0.5) / u_gridSize).rg;
-  vec4 source = texture2D(u_source, sourceUv);
-  rgb = source.rgb;
-  float value = luminance(source.rgb);
+// Colour a cell samples from one source. Outside the drawn rectangle the Canvas
+// renderer sees the background it filled its sample canvas with.
+vec3 sampleAt(sampler2D image, vec4 rect, vec2 center) {
+  vec2 uv = (center - rect.xy) / rect.zw;
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return u_background.rgb;
+  return texture2D(image, uv).rgb;
+}
+
+float toneOf(vec3 rgb, float noise) {
+  float value = luminance(rgb);
   value = pow(clamp((value - 0.5) * u_contrast + 0.5 + u_brightness, 0.0, 1.0), u_gamma);
   // Canvas inverts before adding noise, so the noise is not mirrored with it.
   if (u_invert) value = 1.0 - value;
-  value = clamp(value + (noise.x - 0.5) * u_noiseAmount, 0.0, 1.0);
+  return clamp(value + (noise - 0.5) * u_noiseAmount, 0.0, 1.0);
+}
+
+bool cellValue(vec2 cell, out float dithered, out float toned, out vec3 rgb, out float mask) {
+  vec2 center = (cell + 0.5) * u_cellSize;
+  vec2 noise = texture2D(u_noise, (cell + 0.5) / u_gridSize).rg;
+  rgb = sampleAt(u_source, u_drawRect, center);
+  float value = toneOf(rgb, noise.x);
+  if (u_secondaryActive) {
+    vec3 other = sampleAt(u_secondary, u_secondaryRect, center);
+    value = mix(value, toneOf(other, noise.x), u_sourceMix);
+    rgb = mix(rgb, other, u_sourceMix);
+  }
   float binary = value >= localThreshold(cell, u_threshold, noise) ? 1.0 : 0.0;
   // Canvas applies the mask to the dithered value only; the sampled tone that
   // drives displacement and hybrid selection stays untouched.
@@ -528,6 +546,10 @@ interface WebGLUniforms {
   maskThreshold: WebGLUniformLocation;
   maskFeather: WebGLUniformLocation;
   maskProgress: WebGLUniformLocation;
+  secondary: WebGLUniformLocation;
+  secondaryRect: WebGLUniformLocation;
+  sourceMix: WebGLUniformLocation;
+  secondaryActive: WebGLUniformLocation;
   primitiveMix: WebGLUniformLocation;
   stagger: WebGLUniformLocation;
   cssSize: WebGLUniformLocation;
@@ -678,8 +700,9 @@ export class WebGLRenderer implements DitherRenderer {
 
   static fallbackReason(
     options: AgencyDitherOptions,
-    secondary?: SourceFrame | null,
-    // Masks are handled in the shader now; the parameter stays for callers.
+    // Both extra sources are sampled in the shader now. The parameters remain
+    // so callers do not have to change, and so a future limit can use them.
+    _secondary?: SourceFrame | null,
     _mask?: SourceFrame | null
   ): string {
     // Every message is interned. This runs twice per frame for each instance on
@@ -695,9 +718,6 @@ export class WebGLRenderer implements DitherRenderer {
     }
     if (!(options.algorithm in ALGORITHMS)) {
       return ALGORITHM_REASON[options.algorithm] ?? UNSUPPORTED_ALGORITHM;
-    }
-    if (secondary?.ready && options.sourceMix > 0) {
-      return 'Secondary-source blending requires the Canvas renderer';
     }
     if (options.toneMap.length) return 'Tone maps require the Canvas renderer';
     if (options.palette.length > PALETTE_LIMIT) {
@@ -728,6 +748,8 @@ export class WebGLRenderer implements DitherRenderer {
   private paletteTexture!: WebGLTexture;
   private maskTexture!: WebGLTexture;
   private uploadedMask: SourceFrame | null = null;
+  private secondaryTexture!: WebGLTexture;
+  private uploadedSecondary: SourceFrame | null = null;
   private paletteKey = '';
   private glyphKey = '';
   private glyphCount = 1;
@@ -816,6 +838,10 @@ export class WebGLRenderer implements DitherRenderer {
     this.maskTexture = gl.createTexture() ?? (() => {
       throw new Error('AgencyDitherFX could not create a WebGL texture.');
     })();
+    this.secondaryTexture = gl.createTexture() ?? (() => {
+      throw new Error('AgencyDitherFX could not create a WebGL texture.');
+    })();
+    this.uploadedSecondary = null;
     this.paletteKey = '';
     this.uploadedMask = null;
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
@@ -843,6 +869,10 @@ export class WebGLRenderer implements DitherRenderer {
       maskThreshold: getUniform(gl, this.program, 'u_maskThreshold'),
       maskFeather: getUniform(gl, this.program, 'u_maskFeather'),
       maskProgress: getUniform(gl, this.program, 'u_maskProgress'),
+      secondary: getUniform(gl, this.program, 'u_secondary'),
+      secondaryRect: getUniform(gl, this.program, 'u_secondaryRect'),
+      sourceMix: getUniform(gl, this.program, 'u_sourceMix'),
+      secondaryActive: getUniform(gl, this.program, 'u_secondaryActive'),
       primitiveMix: getUniform(gl, this.program, 'u_primitiveMix'),
       stagger: getUniform(gl, this.program, 'u_stagger'),
       cssSize: getUniform(gl, this.program, 'u_cssSize'),
@@ -960,6 +990,7 @@ export class WebGLRenderer implements DitherRenderer {
       this.gl.deleteTexture(this.glyphTexture);
       this.gl.deleteTexture(this.paletteTexture);
       this.gl.deleteTexture(this.maskTexture);
+      this.gl.deleteTexture(this.secondaryTexture);
       this.gl.deleteProgram(this.program);
       // Frees the backing context immediately instead of waiting for GC, which
       // matters when instances are created and torn down across route changes.
@@ -1041,6 +1072,7 @@ export class WebGLRenderer implements DitherRenderer {
     );
     gl.uniform1f(this.uniforms.primitiveMix, options.primitiveMix);
     this.updateMask(options, mask);
+    this.updateSecondary(options, secondary);
 
     const [drawX, drawY, drawWidth, drawHeight] = this.drawRect(source, options);
     const foreground = rgba(options.foreground);
@@ -1053,6 +1085,7 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1i(this.uniforms.glyphAtlas, 2);
     gl.uniform1i(this.uniforms.palette, 3);
     gl.uniform1i(this.uniforms.mask, 4);
+    gl.uniform1i(this.uniforms.secondary, 5);
     gl.uniform2f(this.uniforms.cssSize, this.cssWidth, this.cssHeight);
     gl.uniform2f(this.uniforms.gridSize, this.columns, this.rows);
     gl.uniform4f(this.uniforms.drawRect, drawX, drawY, drawWidth, drawHeight);
@@ -1303,6 +1336,41 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1f(this.uniforms.maskThreshold, clamp(options.maskThreshold));
     gl.uniform1f(this.uniforms.maskFeather, Math.max(0.001, options.maskFeather));
     gl.uniform1f(this.uniforms.maskProgress, clamp(options.maskProgress));
+  }
+
+  /** Uploads the second source and publishes its placement and mix. */
+  private updateSecondary(
+    options: AgencyDitherOptions,
+    secondary: SourceFrame | null | undefined
+  ): void {
+    const gl = this.gl;
+    const active = Boolean(secondary?.ready) && options.sourceMix > 0;
+    gl.uniform1i(this.uniforms.secondaryActive, active ? 1 : 0);
+    if (!active || !secondary) {
+      this.uploadedSecondary = null;
+      return;
+    }
+
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, this.secondaryTexture);
+    if (secondary.dynamic || this.uploadedSecondary !== secondary) {
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texImage2D(
+        gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE,
+        secondary.drawable as TexImageSource
+      );
+      this.uploadedSecondary = secondary;
+    }
+    gl.activeTexture(gl.TEXTURE0);
+
+    // The second source shares the primary's fit, so it uses the same rect
+    // maths against its own intrinsic size.
+    const rect = this.placementRect(secondary, options.fit, 1, 0.5, 0.5);
+    gl.uniform4f(this.uniforms.secondaryRect, rect[0], rect[1], rect[2], rect[3]);
+    gl.uniform1f(this.uniforms.sourceMix, clamp(options.sourceMix));
   }
 
   /** Uploads the palette as a 1 x PALETTE_LIMIT strip when it changes. */
