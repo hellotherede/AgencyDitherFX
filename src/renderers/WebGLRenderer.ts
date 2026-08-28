@@ -36,6 +36,7 @@ uniform sampler2D u_glyphAtlas;
 uniform float u_glyphCount;
 uniform vec2 u_glyphTile;
 uniform bool u_glyphReady;
+uniform float u_glyphScramble;
 // Up to PALETTE_LIMIT colours in a 1 x N strip. A texture rather than a uniform
 // array because GLSL ES 1.00 does not guarantee dynamic indexing of arrays.
 uniform sampler2D u_palette;
@@ -224,9 +225,14 @@ float toneOf(vec3 rgb, float noise) {
   return clamp(value + (noise - 0.5) * u_noiseAmount, 0.0, 1.0);
 }
 
-bool cellValue(vec2 cell, out float dithered, out float toned, out vec3 rgb, out float mask) {
+bool cellValue(
+  vec2 cell, out float dithered, out float toned, out vec3 rgb, out float mask,
+  out vec2 scramble
+) {
   vec2 center = (cell + 0.5) * u_cellSize;
-  vec2 noise = texture2D(u_noise, (cell + 0.5) / u_gridSize).rg;
+  vec4 cellNoise = texture2D(u_noise, (cell + 0.5) / u_gridSize);
+  vec2 noise = cellNoise.rg;
+  scramble = cellNoise.ba;
   rgb = sampleAt(u_source, u_drawRect, center);
   float value = toneOf(rgb, noise.x);
   if (u_secondaryActive) {
@@ -302,7 +308,8 @@ float primitiveCoverage(
   float dithered;
   float toned;
   float mask;
-  if (!cellValue(cell, dithered, toned, rgb, mask)) return 0.0;
+  vec2 scramble;
+  if (!cellValue(cell, dithered, toned, rgb, mask, scramble)) return 0.0;
   if (mask <= 0.0) return 0.0;
   float reveal = revealForCell(cell) * mask;
   if (reveal <= 0.0) return 0.0;
@@ -333,6 +340,11 @@ float primitiveCoverage(
     vec2 uv = delta / u_glyphTile + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
     float index = floor(dithered * (u_glyphCount - 1.0) + 0.5);
+    if (u_glyphScramble > 0.0) {
+      // The roll is stored as the raw 0..99 integer the Canvas renderer tests.
+      float roll = floor(scramble.x * 255.0 + 0.5) / 100.0;
+      if (roll < u_glyphScramble) index = floor(scramble.y * 255.0 + 0.5);
+    }
     return texture2D(u_glyphAtlas, vec2((index + uv.x) / u_glyphCount, uv.y)).a;
   }
 
@@ -386,7 +398,8 @@ void main() {
     float toned;
     float mask;
     vec3 rgb;
-    if (!cellValue(cell, dithered, toned, rgb, mask)) {
+    vec2 scramble;
+    if (!cellValue(cell, dithered, toned, rgb, mask, scramble)) {
       gl_FragColor = background;
       return;
     }
@@ -535,6 +548,7 @@ interface WebGLUniforms {
   glyphCount: WebGLUniformLocation;
   glyphTile: WebGLUniformLocation;
   glyphReady: WebGLUniformLocation;
+  glyphScramble: WebGLUniformLocation;
   palette: WebGLUniformLocation;
   paletteCount: WebGLUniformLocation;
   paletteMix: WebGLUniformLocation;
@@ -713,8 +727,8 @@ export class WebGLRenderer implements DitherRenderer {
     if (options.glyphSelection !== 'tone') {
       return 'Random glyph selection requires the Canvas renderer';
     }
-    if (options.mode === 'ascii' && options.glyphScramble > 0) {
-      return 'Glyph scramble requires the Canvas renderer';
+    if (options.mode === 'ascii' && options.glyphRamp.length > 255) {
+      return 'Glyph ramps over 255 entries require the Canvas renderer';
     }
     if (!(options.algorithm in ALGORITHMS)) {
       return ALGORITHM_REASON[options.algorithm] ?? UNSUPPORTED_ALGORITHM;
@@ -772,6 +786,9 @@ export class WebGLRenderer implements DitherRenderer {
   private noiseColumns = 0;
   private noiseRows = 0;
   private noiseFrame = Number.NaN;
+  private noiseRollFrame = Number.NaN;
+  private noiseShiftFrame = Number.NaN;
+  private noiseRampLength = 0;
   private cellWidth = 8;
   private cellHeight = 8;
   private readonly onContextLost = (event: Event): void => {
@@ -858,6 +875,7 @@ export class WebGLRenderer implements DitherRenderer {
       glyphCount: getUniform(gl, this.program, 'u_glyphCount'),
       glyphTile: getUniform(gl, this.program, 'u_glyphTile'),
       glyphReady: getUniform(gl, this.program, 'u_glyphReady'),
+      glyphScramble: getUniform(gl, this.program, 'u_glyphScramble'),
       palette: getUniform(gl, this.program, 'u_palette'),
       paletteCount: getUniform(gl, this.program, 'u_paletteCount'),
       paletteMix: getUniform(gl, this.program, 'u_paletteMix'),
@@ -1053,13 +1071,19 @@ export class WebGLRenderer implements DitherRenderer {
       return this.stats(warning);
     }
 
-    this.updateNoise(options, time);
+    // The atlas settles glyphCount, which the scramble channels are baked
+    // against, so it has to run first.
     if (options.mode === 'ascii' && !this.updateGlyphAtlas(options)) {
       warning = 'Glyph atlas too large for this device; Canvas renderer is recommended';
     }
+    this.updateNoise(options, time, this.glyphCount);
     gl.uniform1f(this.uniforms.glyphCount, this.glyphCount);
     gl.uniform2f(this.uniforms.glyphTile, this.glyphTileCss, this.glyphTileCss);
     gl.uniform1i(this.uniforms.glyphReady, this.glyphReady ? 1 : 0);
+    gl.uniform1f(
+      this.uniforms.glyphScramble,
+      options.mode === 'ascii' ? options.glyphScramble : 0
+    );
     this.updatePalette(options);
     gl.uniform1f(
       this.uniforms.paletteCount,
@@ -1204,13 +1228,32 @@ export class WebGLRenderer implements DitherRenderer {
    * changes. The frame index advances a handful of times per second, so this is
    * a few tens of kilobytes of work well below once per rendered frame.
    */
-  private updateNoise(options: AgencyDitherOptions, time: number): void {
+  private updateNoise(
+    options: AgencyDitherOptions,
+    time: number,
+    rampLength: number
+  ): void {
     const gl = this.gl;
     const columns = this.columns;
     const rows = this.rows;
     const frame = Math.floor(time * options.noiseSpeed * 0.02);
+    // Glyph scramble runs on its own two clocks: one decides which cells
+    // scramble, the other picks the character. Both index the cell linearly and
+    // multiply by 16807, which overflows what a shader float can hold exactly,
+    // so the results are baked here alongside the noise.
+    const scrambles = options.mode === 'ascii' && options.glyphScramble > 0;
+    const rollFrame = scrambles ? Math.floor(time / 70) : 0;
+    const shiftFrame = scrambles ? Math.floor(time / 80) : 0;
     const resized = columns !== this.noiseColumns || rows !== this.noiseRows;
-    if (!resized && frame === this.noiseFrame) return;
+    if (
+      !resized &&
+      frame === this.noiseFrame &&
+      rollFrame === this.noiseRollFrame &&
+      shiftFrame === this.noiseShiftFrame &&
+      rampLength === this.noiseRampLength
+    ) {
+      return;
+    }
 
     if (resized) {
       this.noiseData = new Uint8Array(columns * rows * 4);
@@ -1218,15 +1261,25 @@ export class WebGLRenderer implements DitherRenderer {
       this.noiseRows = rows;
     }
     this.noiseFrame = frame;
+    this.noiseRollFrame = rollFrame;
+    this.noiseShiftFrame = shiftFrame;
+    this.noiseRampLength = rampLength;
 
     const data = this.noiseData;
+    const ramp = Math.max(1, rampLength);
     let offset = 0;
+    let index = 0;
     for (let y = 0; y < rows; y += 1) {
-      for (let x = 0; x < columns; x += 1, offset += 4) {
+      for (let x = 0; x < columns; x += 1, offset += 4, index += 1) {
         data[offset] = hash(x, y, frame) * 255;
         // The blue-noise algorithm averages a fixed pair of hashes per cell.
         data[offset + 1] =
           ((hash(x, y, 17) + hash(x + 7, y + 13, 41)) * 0.5) * 255;
+        if (!scrambles) continue;
+        // Stored as the raw integers the Canvas renderer compares, so the
+        // shader can recover them exactly rather than through a 0..1 ratio.
+        data[offset + 2] = (index * 16807 + rollFrame) % 100;
+        data[offset + 3] = (index + shiftFrame) % ramp;
       }
     }
 

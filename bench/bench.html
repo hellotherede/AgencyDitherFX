@@ -462,7 +462,9 @@
           { id: 'mix-full',  secondary: true, opts: { mode: 'dots', noiseAmount: 0, sourceMix: 1 } },
           // 'contain' leaves letterboxing, which Canvas fills with the background
           // colour and then dithers like any other cell.
-          { id: 'contain-fit', opts: { mode: 'dots', noiseAmount: 0, fit: 'contain' } }
+          { id: 'contain-fit', opts: { mode: 'dots', noiseAmount: 0, fit: 'contain' } },
+          { id: 'ascii-scramble',  opts: { mode: 'ascii', noiseAmount: 0, glyphScramble: 0.3 } },
+          { id: 'ascii-scramble-hi', opts: { mode: 'ascii', noiseAmount: 0, glyphScramble: 0.9 } }
         ];
         const out = [];
         for (const cfg of CONFIGS) {
