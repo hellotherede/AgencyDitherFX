@@ -34,6 +34,8 @@ const ROUNDS = Number(flag('rounds', 3));
 const ONLY = flag('only', '');
 const OUT = flag('out', '');
 const VERIFY = args.includes('--verify');
+const CORRECTNESS = args.includes('--correctness');
+const RENDERERS = args.includes('--renderers');
 const BATCH = flag('batch', '');
 
 // ---------------------------------------------------------------- server
@@ -139,6 +141,62 @@ const ua = await evaluate('navigator.userAgent');
 
 if (BATCH) await evaluate(`globalThis.__ADFX_BATCH = ${BATCH === 'inf' ? 'Infinity' : Number(BATCH)}`);
 const only = ONLY ? JSON.stringify(ONLY.split(',')) : 'null';
+if (args.includes('--noise')) {
+  const res = await evaluate('window.__noise()');
+  const hash = (x, y, seed) => {
+    let v = Math.imul(x + seed * 1013, 374761393) ^ Math.imul(y + seed * 7919, 668265263);
+    v = Math.imul(v ^ (v >>> 13), 1274126177);
+    return ((v ^ (v >>> 16)) >>> 0) / 4294967295;
+  };
+  const frame = Math.floor(4000 * 0.35 * 0.02);
+  console.log('\nnoise readback: shader vs Canvas hash (frame ' + frame + ')');
+  console.log('cell  shader  expected');
+  res.read.forEach((got, x) => {
+    const want = Math.round(hash(x, 0, frame) * 255);
+    console.log(String(x).padStart(4) + String(got).padStart(8) + String(want).padStart(10) +
+      (Math.abs(got - want) <= 2 ? '  ok' : '  MISMATCH'));
+  });
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(0);
+}
+if (RENDERERS) {
+  const rows = await evaluate('window.__renderers()');
+  console.log('\nCanvas vs WebGL on identical config (luminance delta, 0-255)');
+  console.log('-'.repeat(78));
+  for (const row of rows) {
+    console.log(
+      `${row.id.padEnd(16)} ${row.actual.padEnd(16)}` +
+      ` mean=${row.meanDiff.toFixed(2).padStart(6)}` +
+      ` max=${row.maxDiff.toFixed(0).padStart(4)}` +
+      ` >8:${row.pctPixels.toFixed(1).padStart(5)}%` +
+      ` >32:${row.pct32.toFixed(1).padStart(5)}%` +
+      ` >64:${row.pct64.toFixed(1).padStart(5)}%` +
+      ` >128:${row.pct128.toFixed(1).padStart(5)}%`
+    );
+  }
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(0);
+}
+if (CORRECTNESS) {
+  const rows = await evaluate('window.__correctness()');
+  console.log('\nWebGL transparent-reveal residue (frame 2 must be fully clear)');
+  console.log('-'.repeat(72));
+  for (const row of rows) {
+    if (row.skipped) { console.log(`${row.lib.padEnd(11)} skipped`); continue; }
+    if (row.error) { console.log(`${row.lib.padEnd(11)} ERROR ${row.error}`); continue; }
+    console.log(
+      `${row.lib.padEnd(11)} frame1 inked=${String(row.inkedFirst).padStart(7)}` +
+      `  frame2 residue=${String(row.residue).padStart(7)}` +
+      `  maxAlpha=${String(row.maxAlpha).padStart(3)}  ` +
+      (row.clean ? 'CLEAN' : 'STALE PIXELS')
+    );
+  }
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(rows.some(r => r.lib === 'optimized' && !r.clean) ? 1 : 0);
+}
 if (VERIFY) {
   const rows = await evaluate(`window.__verify({ only: ${only} })`);
   console.log('\npixel parity: baseline vs optimized');

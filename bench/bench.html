@@ -41,6 +41,23 @@
         return c;
       }
 
+      function makeSmooth(w, h) {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        const grad = ctx.createLinearGradient(0, 0, w, h);
+        grad.addColorStop(0, '#000000');
+        grad.addColorStop(1, '#ffffff');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+        return c;
+      }
+      const SMOOTH_SOURCE = await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.src = makeSmooth(960, 540).toDataURL('image/png');
+      });
+
       const PATTERN = makePattern(960, 540);
       const STATIC_SOURCE = await new Promise((resolve) => {
         const img = new Image();
@@ -296,6 +313,221 @@
           }
         }
         return out;
+      };
+
+      // ---- WebGL transparency correctness --------------------------------
+      // The shader can output a fully transparent pixel. If the draw is blended
+      // over the framebuffer instead of replacing it, a src alpha of 0 leaves
+      // the PREVIOUS frame visible, so a reveal animation never clears.
+      window.__correctness = async () => {
+        const [A, B] = await Promise.all([
+          import('./lib-baseline.js'),
+          import('./lib-optimized.js')
+        ]);
+        const out = [];
+        for (const [name, Lib] of [['baseline', A], ['optimized', B]]) {
+          const host = await makeHost();
+          const fx = new Lib.AgencyDitherFX(host, {
+            ...BASE,
+            mode: 'dots',
+            renderer: 'webgl',
+            backgroundTransparent: true,
+            stagger: false,
+            revealProgress: 1
+          });
+          try {
+            await fx.setSource(STATIC_SOURCE);
+            fx.stop();
+            const gl = fx.canvas.getContext('webgl');
+            if (!gl) { out.push({ lib: name, skipped: true }); continue; }
+
+            // Frame 1: fully revealed, so ink is painted across the canvas.
+            fx.render(1000);
+            const w = fx.canvas.width, h = fx.canvas.height;
+            const first = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, first);
+            let inkedFirst = 0;
+            for (let i = 3; i < first.length; i += 4) if (first[i] > 0) inkedFirst += 1;
+
+            // Frame 2: nothing revealed, so every pixel must be transparent.
+            fx.set({ revealProgress: 0 });
+            fx.render(1016);
+            const second = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, second);
+            let residue = 0;
+            let maxAlpha = 0;
+            for (let i = 3; i < second.length; i += 4) {
+              if (second[i] > 0) residue += 1;
+              if (second[i] > maxAlpha) maxAlpha = second[i];
+            }
+            out.push({
+              lib: name,
+              pixels: w * h,
+              inkedFirst,
+              residue,
+              maxAlpha,
+              clean: residue === 0
+            });
+          } catch (error) {
+            out.push({ lib: name, error: String(error && error.message || error) });
+          } finally {
+            fx.destroy();
+            host.remove();
+          }
+        }
+        return out;
+      };
+
+      // ---- Canvas vs WebGL divergence ------------------------------------
+      // Both renderers claim to draw the same effect. This measures how far
+      // apart they actually are on an identical configuration.
+      window.__renderers = async () => {
+        const Lib = await import('./lib-optimized.js');
+        const CONFIGS = [
+          // Smooth source + no dither: isolates the tone pipeline and geometry.
+          { id: 'smooth-raw-nodith', smooth: true, opts: { mode: 'raw-dither', noiseAmount: 0, ditherAmount: 0 } },
+          { id: 'smooth-raw-dith',   smooth: true, opts: { mode: 'raw-dither', noiseAmount: 0 } },
+          { id: 'smooth-dots',       smooth: true, opts: { mode: 'dots', noiseAmount: 0 } },
+          { id: 'dots-default',   opts: { mode: 'dots' } },
+          { id: 'dots-nonoise',   opts: { mode: 'dots', noiseAmount: 0 } },
+          { id: 'blocks-nonoise', opts: { mode: 'blocks', noiseAmount: 0 } },
+          { id: 'raw-nonoise',    opts: { mode: 'raw-dither', noiseAmount: 0 } },
+          // raw-dither has no antialiasing, so this isolates the noise term.
+          { id: 'raw-noise',      opts: { mode: 'raw-dither' } },
+          { id: 'smooth-raw-noise', smooth: true, opts: { mode: 'raw-dither' } },
+          { id: 'dots-flat',      opts: { mode: 'dots', noiseAmount: 0, contrast: 1, ditherAmount: 1 } },
+          { id: 'dots-reveal-50', opts: { mode: 'dots', noiseAmount: 0, revealProgress: 0.5 } }
+        ];
+        const out = [];
+        for (const cfg of CONFIGS) {
+          const shots = {};
+          for (const renderer of ['canvas', 'webgl']) {
+            const host = await makeHost();
+            const fx = new Lib.AgencyDitherFX(host, {
+              ...BASE, ...cfg.opts, renderer, immediate: true
+            });
+            try {
+              await fx.setSource(cfg.smooth ? SMOOTH_SOURCE : STATIC_SOURCE);
+              fx.stop();
+              fx.render(4000);
+              const w = fx.canvas.width, h = fx.canvas.height;
+              const ctx = fx.canvas.getContext('2d');
+              if (ctx) {
+                shots[renderer] = { w, h, data: ctx.getImageData(0, 0, w, h).data, kind: fx.getStats().renderer };
+              } else {
+                const gl = fx.canvas.getContext('webgl');
+                const px = new Uint8Array(w * h * 4);
+                gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+                // readPixels is bottom-up; flip to match getImageData order.
+                const flipped = new Uint8Array(px.length);
+                const stride = w * 4;
+                for (let y = 0; y < h; y += 1) {
+                  flipped.set(px.subarray((h - 1 - y) * stride, (h - y) * stride), y * stride);
+                }
+                shots[renderer] = { w, h, data: flipped, kind: fx.getStats().renderer };
+              }
+            } finally {
+              fx.destroy();
+              host.remove();
+            }
+          }
+          const a = shots.canvas, b = shots.webgl;
+          let sum = 0, differing = 0, maxDiff = 0;
+          // Bucket by magnitude: small deltas are antialiasing on primitive
+          // edges, large ones mean a cell is on in one renderer and off in the other.
+          let b32 = 0, b64 = 0, b128 = 0;
+          // Compare luminance per pixel; ignore alpha so opaque configs compare cleanly.
+          for (let i = 0; i < a.data.length; i += 4) {
+            const la = (a.data[i] * 0.2126 + a.data[i + 1] * 0.7152 + a.data[i + 2] * 0.0722);
+            const lb = (b.data[i] * 0.2126 + b.data[i + 1] * 0.7152 + b.data[i + 2] * 0.0722);
+            const d = Math.abs(la - lb);
+            if (d > 8) differing += 1;
+            if (d > 32) b32 += 1;
+            if (d > 64) b64 += 1;
+            if (d > 128) b128 += 1;
+            sum += d;
+            if (d > maxDiff) maxDiff = d;
+          }
+          const pixels = a.data.length / 4;
+          // Sanity check: if the un-flipped comparison scores better, the flip
+          // in this harness is backwards and every number above is meaningless.
+          let unflipped = 0;
+          const stride = a.w * 4;
+          for (let y = 0; y < a.h; y += 1) {
+            const srcRow = (a.h - 1 - y) * stride;
+            for (let x = 0; x < stride; x += 4) {
+              const i = y * stride + x;
+              const j = srcRow + x;
+              const la = (a.data[i] * 0.2126 + a.data[i + 1] * 0.7152 + a.data[i + 2] * 0.0722);
+              const lb = (b.data[j] * 0.2126 + b.data[j + 1] * 0.7152 + b.data[j + 2] * 0.0722);
+              unflipped += Math.abs(la - lb);
+            }
+          }
+          out.push({
+            id: cfg.id,
+            actual: `${a.kind}/${b.kind}`,
+            meanDiff: sum / pixels,
+            meanUnflipped: unflipped / pixels,
+            maxDiff,
+            pctPixels: (differing / pixels) * 100,
+            pct32: (b32 / pixels) * 100,
+            pct64: (b64 / pixels) * 100,
+            pct128: (b128 / pixels) * 100
+          });
+        }
+        return out;
+      };
+
+      // ---- noise readback --------------------------------------------------
+      // A flat 50% grey source with ditherAmount 0 and noiseAmount 1 makes
+      // raw-dither output exactly the noise value, so it can be compared with
+      // the JS hash directly.
+      window.__noise = async () => {
+        const Lib = await import('./lib-optimized.js');
+        const grey = document.createElement('canvas');
+        grey.width = 64; grey.height = 64;
+        const gctx = grey.getContext('2d');
+        gctx.fillStyle = 'rgb(128 128 128)';
+        gctx.fillRect(0, 0, 64, 64);
+        const GREY = await new Promise((r) => {
+          const img = new Image();
+          img.onload = () => r(img);
+          img.src = grey.toDataURL('image/png');
+        });
+
+        const opts = {
+          ...BASE, mode: 'raw-dither', renderer: 'webgl', immediate: true,
+          noiseAmount: 1, ditherAmount: 0, contrast: 1, brightness: 0,
+          gamma: 1, threshold: 0.5, cellSize: 8, fit: 'fill'
+        };
+        const host = await makeHost();
+        const fx = new Lib.AgencyDitherFX(host, opts);
+        let result;
+        try {
+          await fx.setSource(GREY);
+          fx.stop();
+          fx.render(4000);
+          const w = fx.canvas.width, h = fx.canvas.height;
+          const gl = fx.canvas.getContext('webgl');
+          const px = new Uint8Array(w * h * 4);
+          gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          const stats = fx.getStats();
+          const cols = Math.round(stats.cells / Math.round(h / (h / (stats.cells / (w / (w / 1))))));
+          // Sample the centre of the first few cells along the top row.
+          const cellW = w / Math.round(w / 8);
+          const read = [];
+          for (let i = 0; i < 8; i += 1) {
+            const cx = Math.floor((i + 0.5) * cellW);
+            // readPixels is bottom-up: the top row of the image is the last row.
+            const cy = h - 1 - Math.floor(0.5 * cellW);
+            read.push(px[(cy * w + cx) * 4]);
+          }
+          result = { read, w, h, cells: stats.cells };
+        } finally {
+          fx.destroy();
+          host.remove();
+        }
+        return result;
       };
 
       document.getElementById('log').textContent = 'ready';
