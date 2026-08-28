@@ -18,6 +18,24 @@ type Container = HTMLElement | HTMLCanvasElement;
 type Listener = (event: CustomEvent<RenderStats>) => void;
 type ErrorListener = (event: CustomEvent<Error>) => void;
 
+/** The subset of a GSAP tween/timeline this class relies on. */
+interface TrackedTween {
+  kill?: () => void;
+  isActive?: () => boolean;
+  progress?: () => number;
+}
+
+/** Sweep finished tweens once the retained set reaches this size. */
+const TWEEN_SWEEP_AT = 32;
+
+/**
+ * How long an inactive instance keeps its WebGL context before handing the slot
+ * back. Long enough that scrolling past a section and back does not rebuild the
+ * program, short enough that an off-screen section stops holding a scarce
+ * resource.
+ */
+const GPU_RELEASE_DELAY_MS = 2000;
+
 export class AgencyDitherFX {
   static useGSAP(gsap: GsapLike): void {
     useGsap(gsap);
@@ -39,14 +57,23 @@ export class AgencyDitherFX {
   private visible = false;
   private intersectionKnown = false;
   private destroyed = false;
+  private suspended = false;
+  // A WebGL context is a scarce per-page resource, so one is only held while
+  // the instance is actually running. Instances start on Canvas and upgrade on
+  // activation, which stops eight off-screen sections from consuming the whole
+  // budget before the first one is even visible.
+  private gpuAllowed = false;
+  private gpuReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+  private rendererBudgetGeneration = -1;
   private pendingInitialSource: SourceInput | null = null;
   private dirty = true;
   private oneShot = false;
   private lastRender = 0;
+  private renderListeners = 0;
   private frameTimes: number[] = [];
   // Tweens target this.params, so they keep the instance (and its render
   // callback) alive after destroy() unless they are killed explicitly.
-  private readonly tweens = new Set<{ kill?: () => void }>();
+  private readonly tweens = new Set<TrackedTween>();
   private stats: RenderStats = {
     fps: 0, cells: 0, width: 0, height: 0, renderer: 'canvas', warning: ''
   };
@@ -88,10 +115,7 @@ export class AgencyDitherFX {
   };
   private readonly onDocumentVisibilityChange = (): void => {
     if (document.hidden) {
-      scheduler.remove(this);
-      this.source.pause();
-      this.secondarySource.pause();
-      this.maskSource.pause();
+      this.deactivate();
       return;
     }
     if (this.isActive()) this.activate();
@@ -134,10 +158,7 @@ export class AgencyDitherFX {
         if (this.visible) {
           this.activate();
         } else {
-          scheduler.remove(this);
-          this.source.pause();
-          this.secondarySource.pause();
-          this.maskSource.pause();
+          this.deactivate();
         }
       },
       { rootMargin: '160px' }
@@ -220,6 +241,9 @@ export class AgencyDitherFX {
     Object.assign(this.params, merged);
     this.updateAccessibility();
     this.updateFallback();
+    // Switching an already-running instance to 'webgl' has to claim a context;
+    // activation alone would not have done it while renderer was 'canvas'.
+    if (this.isActive()) this.acquireGpu();
     this.ensureRenderer();
     this.resize();
     this.requestRender();
@@ -242,6 +266,7 @@ export class AgencyDitherFX {
     Object.assign(this.params, next);
     this.updateAccessibility();
     this.updateFallback();
+    if (this.isActive()) this.acquireGpu();
     this.ensureRenderer();
     this.resize();
     this.requestRender();
@@ -302,9 +327,14 @@ export class AgencyDitherFX {
     );
     this.trackFps(time);
     this.dirty = false;
-    this.element.dispatchEvent(new CustomEvent<RenderStats>('agencydither:render', {
-      detail: this.stats
-    }));
+    // Constructing and dispatching a DOM event every frame was noise next to a
+    // 27 ms Canvas frame, but it is a real share of a 0.2 ms WebGL one. Only
+    // instances that someone is listening to pay for it.
+    if (this.renderListeners > 0) {
+      this.element.dispatchEvent(new CustomEvent<RenderStats>('agencydither:render', {
+        detail: this.stats
+      }));
+    }
     return this;
   }
 
@@ -343,15 +373,23 @@ export class AgencyDitherFX {
 
   to(vars: Partial<AgencyDitherOptions>, gsapVars: Record<string, unknown> = {}): unknown {
     const gsap = getGsap();
-    return this.track(gsap.to(this.params, {
+    let handle: TrackedTween | null = null;
+    const tween = gsap.to(this.params, {
       ...vars,
       ...gsapVars,
       onUpdate: () => {
         this.requestRender();
         const callback = gsapVars.onUpdate;
         if (typeof callback === 'function') callback();
+      },
+      onComplete: () => {
+        this.releaseTween(handle);
+        const callback = gsapVars.onComplete;
+        if (typeof callback === 'function') callback();
       }
-    }));
+    });
+    handle = tween as TrackedTween;
+    return this.track(tween);
   }
 
   fromTo(
@@ -359,15 +397,23 @@ export class AgencyDitherFX {
     toVars: Partial<AgencyDitherOptions>,
     gsapVars: Record<string, unknown> = {}
   ): unknown {
-    return this.track(getGsap().fromTo(this.params, fromVars, {
+    let handle: TrackedTween | null = null;
+    const tween = getGsap().fromTo(this.params, fromVars, {
       ...toVars,
       ...gsapVars,
       onUpdate: () => {
         this.requestRender();
         const callback = gsapVars.onUpdate;
         if (typeof callback === 'function') callback();
+      },
+      onComplete: () => {
+        this.releaseTween(handle);
+        const callback = gsapVars.onComplete;
+        if (typeof callback === 'function') callback();
       }
-    }));
+    });
+    handle = tween as TrackedTween;
+    return this.track(tween);
   }
 
   timeline(vars: Record<string, unknown> = {}): unknown {
@@ -397,7 +443,25 @@ export class AgencyDitherFX {
   onRender(listener: Listener): () => void {
     const wrapped = listener as EventListener;
     this.element.addEventListener('agencydither:render', wrapped);
-    return () => this.element.removeEventListener('agencydither:render', wrapped);
+    this.renderListeners += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.renderListeners -= 1;
+      this.element.removeEventListener('agencydither:render', wrapped);
+    };
+  }
+
+  /**
+   * Opts an instance into per-frame render events for listeners attached with
+   * `addEventListener` directly, which this class cannot count. `onRender()`
+   * enables them automatically.
+   */
+  emitRenderEvents(enabled = true): this {
+    this.renderListeners += enabled ? 1 : -1;
+    if (this.renderListeners < 0) this.renderListeners = 0;
+    return this;
   }
 
   onError(listener: ErrorListener): () => void {
@@ -409,6 +473,14 @@ export class AgencyDitherFX {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    // Tweens hold this.params and this instance's onUpdate closure, so they
+    // must be killed before anything else is torn down.
+    for (const tween of this.tweens) tween.kill?.();
+    this.tweens.clear();
+    if (this.gpuReleaseTimer !== null) {
+      clearTimeout(this.gpuReleaseTimer);
+      this.gpuReleaseTimer = null;
+    }
     this.stop();
     this.source.release();
     this.secondarySource.release();
@@ -428,9 +500,31 @@ export class AgencyDitherFX {
 
   /** Retains any tween that exposes kill() so destroy() can release it. */
   private track(tween: unknown): unknown {
-    const entry = tween as { kill?: () => void } | null;
-    if (entry && typeof entry.kill === 'function') this.tweens.add(entry);
+    const entry = tween as TrackedTween | null;
+    if (!entry || typeof entry.kill !== 'function') return tween;
+    if (this.tweens.size >= TWEEN_SWEEP_AT) this.pruneTweens();
+    this.tweens.add(entry);
     return tween;
+  }
+
+  /**
+   * Only live tweens need killing at destroy(), so finished ones are dropped.
+   * Without this a page that retweens on every tab change would grow the set
+   * for the lifetime of the instance.
+   */
+  private pruneTweens(): void {
+    for (const tween of this.tweens) {
+      if (typeof tween.isActive !== 'function') continue;
+      if (tween.isActive()) continue;
+      // A tween that is idle at the end of its timeline is done. One that is
+      // idle at the start is merely delayed or paused, so it is kept.
+      if ((tween.progress?.() ?? 0) >= 1) this.tweens.delete(tween);
+    }
+  }
+
+  /** Removes one tween as soon as it reports completion. */
+  private releaseTween(tween: TrackedTween | null): void {
+    if (tween) this.tweens.delete(tween);
   }
 
   private requestRender(): void {
@@ -458,6 +552,7 @@ export class AgencyDitherFX {
 
   private activate(): void {
     if (!this.isActive()) return;
+    this.acquireGpu();
     const pendingSource = this.pendingInitialSource;
     if (pendingSource) {
       this.pendingInitialSource = null;
@@ -472,9 +567,74 @@ export class AgencyDitherFX {
   }
 
   private isActive(): boolean {
-    return !document.hidden && (
+    return !this.suspended && !document.hidden && (
       this.visible || (this.params.immediate && !this.intersectionKnown)
     );
+  }
+
+  /**
+   * Upgrades to the GPU renderer if this instance wants one. Called on every
+   * activation, so a section that lost the context race earlier picks one up as
+   * soon as another instance releases its slot.
+   */
+  private acquireGpu(): void {
+    if (this.gpuReleaseTimer !== null) {
+      clearTimeout(this.gpuReleaseTimer);
+      this.gpuReleaseTimer = null;
+    }
+    if (this.params.renderer !== 'webgl' || this.gpuAllowed) return;
+    this.gpuAllowed = true;
+    const previous = this.renderer;
+    this.ensureRenderer();
+    if (previous !== this.renderer) this.resize();
+  }
+
+  /** Hands the WebGL slot back after a grace period of continuous inactivity. */
+  private scheduleGpuRelease(): void {
+    if (!this.gpuAllowed || this.gpuReleaseTimer !== null) return;
+    this.gpuReleaseTimer = setTimeout(() => {
+      this.gpuReleaseTimer = null;
+      if (this.destroyed || this.isActive()) return;
+      this.gpuAllowed = false;
+      const previous = this.renderer;
+      this.ensureRenderer();
+      if (previous !== this.renderer) this.resize();
+    }, GPU_RELEASE_DELAY_MS);
+  }
+
+  /** Everything that must stop when an instance goes idle. */
+  private deactivate(): void {
+    scheduler.remove(this);
+    this.source.pause();
+    this.secondarySource.pause();
+    this.maskSource.pause();
+    this.scheduleGpuRelease();
+  }
+
+  /**
+   * Stops rendering and media playback until `resume()`. IntersectionObserver
+   * cannot see a tab panel hidden with opacity or visibility while its geometry
+   * still intersects the viewport, so carousels, tabs and sliders need to say
+   * so explicitly.
+   */
+  suspend(): this {
+    if (this.destroyed || this.suspended) return this;
+    this.suspended = true;
+    this.deactivate();
+    return this;
+  }
+
+  /** Reverses `suspend()`, restarting only if the instance is otherwise active. */
+  resume(): this {
+    if (this.destroyed || !this.suspended) return this;
+    this.suspended = false;
+    if (this.isActive()) this.activate();
+    return this;
+  }
+
+  /** Whether `suspend()` is currently holding this instance idle. */
+  get isSuspended(): boolean {
+    return this.suspended;
   }
 
   private resize(): void {
@@ -487,17 +647,70 @@ export class AgencyDitherFX {
       try {
         return new WebGLRenderer(canvas);
       } catch {
+        // Getting the GL context can succeed and shader or buffer setup still
+        // fail, which permanently denies this canvas a 2D context. Falling back
+        // on the same element would then throw and take the instance with it,
+        // so a poisoned canvas is swapped for a clean one first.
+        if (!canvas.getContext('2d')) return new CanvasRenderer(this.swapCanvas());
         return new CanvasRenderer(canvas);
       }
     }
     return new CanvasRenderer(canvas);
   }
 
+  /**
+   * Replaces `this.canvas` with a fresh element, carrying over class, ARIA
+   * state and pointer listeners. Returns the new canvas.
+   */
+  private swapCanvas(): HTMLCanvasElement {
+    if (this.element instanceof HTMLCanvasElement) return this.canvas;
+    const next = Object.assign(document.createElement('canvas'), {
+      className: this.canvas.className
+    });
+    const role = this.canvas.getAttribute('role');
+    if (role) next.setAttribute('role', role);
+    if (this.canvas.getAttribute('aria-hidden') === 'true') {
+      next.setAttribute('aria-hidden', 'true');
+    }
+    const label = this.canvas.getAttribute('aria-label');
+    if (label) next.setAttribute('aria-label', label);
+    this.detachCanvasListeners();
+    if (this.canvas.parentNode) this.canvas.replaceWith(next);
+    else this.element.append(next);
+    this.canvas = next;
+    this.attachCanvasListeners();
+    return next;
+  }
+
+  private attachCanvasListeners(): void {
+    this.canvas.addEventListener('pointermove', this.onPointerMove, { passive: true });
+    this.canvas.addEventListener('pointerleave', this.onPointerLeave, { passive: true });
+    this.canvas.addEventListener('pointerdown', this.onClick, { passive: true });
+    this.canvas.addEventListener('agencydither:webglrestored', this.onWebGLRestored);
+  }
+
+  private detachCanvasListeners(): void {
+    this.canvas.removeEventListener('pointermove', this.onPointerMove);
+    this.canvas.removeEventListener('pointerleave', this.onPointerLeave);
+    this.canvas.removeEventListener('pointerdown', this.onClick);
+    this.canvas.removeEventListener('agencydither:webglrestored', this.onWebGLRestored);
+  }
+
   private ensureRenderer(): void {
     const selected = this.selectedRendererKind();
     const selection = `${this.params.renderer}:${selected}`;
-    if (selection === this.rendererSelection) return;
+    // The generation check lets an instance that lost the context race retry
+    // once a slot is freed. Without it a Canvas fallback was permanent, because
+    // the selection string alone never changes back.
+    const generation = WebGLRenderer.budgetGeneration;
+    if (
+      selection === this.rendererSelection &&
+      generation === this.rendererBudgetGeneration
+    ) {
+      return;
+    }
     this.rendererSelection = selection;
+    this.rendererBudgetGeneration = generation;
     if (selected === this.renderer.kind) return;
     if (this.element instanceof HTMLCanvasElement) {
       this.renderer.destroy();
@@ -506,24 +719,10 @@ export class AgencyDitherFX {
       return;
     }
 
-    const nextCanvas = Object.assign(document.createElement('canvas'), {
-      className: this.canvas.className
-    });
-    nextCanvas.setAttribute('role', this.canvas.getAttribute('role') ?? 'img');
-    if (this.canvas.getAttribute('aria-hidden') === 'true') {
-      nextCanvas.setAttribute('aria-hidden', 'true');
-    }
-    this.canvas.removeEventListener('pointermove', this.onPointerMove);
-    this.canvas.removeEventListener('pointerleave', this.onPointerLeave);
-    this.canvas.removeEventListener('pointerdown', this.onClick);
-    this.canvas.removeEventListener('agencydither:webglrestored', this.onWebGLRestored);
+    // A canvas keeps the context type it was first given, so switching
+    // renderers means starting from a fresh element.
     this.renderer.destroy();
-    this.canvas.replaceWith(nextCanvas);
-    this.canvas = nextCanvas;
-    this.canvas.addEventListener('pointermove', this.onPointerMove, { passive: true });
-    this.canvas.addEventListener('pointerleave', this.onPointerLeave, { passive: true });
-    this.canvas.addEventListener('pointerdown', this.onClick, { passive: true });
-    this.canvas.addEventListener('agencydither:webglrestored', this.onWebGLRestored);
+    this.swapCanvas();
     this.renderer = this.createRenderer(this.canvas, selected);
     this.restoreSymbols();
     this.updateAccessibility();
@@ -531,6 +730,7 @@ export class AgencyDitherFX {
 
   private selectedRendererKind(): RendererKind {
     if (this.params.renderer !== 'webgl') return 'canvas';
+    if (!this.gpuAllowed) return 'canvas';
     return WebGLRenderer.fallbackReason(
       this.params,
       this.secondarySource.current,
