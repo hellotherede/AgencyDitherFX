@@ -173,6 +173,16 @@
       };
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+      function releaseContext(fx) {
+        // Capture before destroy(), which can swap the canvas out.
+        const canvas = fx.canvas;
+        fx.destroy();
+        try {
+          const gl = canvas.getContext('webgl');
+          gl?.getExtension('WEBGL_lose_context')?.loseContext();
+        } catch { /* already gone */ }
+      }
+
       async function makeHost() {
         const host = document.createElement('div');
         STAGE.append(host);
@@ -276,7 +286,7 @@
             drawMs: draw.length ? median(draw) : null
           };
         } finally {
-          fx.destroy();
+          releaseContext(fx);
           host.remove();
         }
       }
@@ -333,7 +343,7 @@
           gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
           return { w, h, data: px };
         } finally {
-          fx.destroy();
+          releaseContext(fx);
           host.remove();
         }
       }
@@ -630,7 +640,7 @@
           }
           result = { read, w, h, cells: stats.cells };
         } finally {
-          fx.destroy();
+          releaseContext(fx);
           host.remove();
         }
         return result;
@@ -691,6 +701,46 @@
           } catch (e) {
             out.push({ id: cfg.id, error: String(e && e.message || e) });
           } finally { fx.destroy(); host.remove(); }
+        }
+        return out;
+      };
+
+      // Per-frame main-thread cost is below performance.now() resolution, so
+      // time a large batch and divide.
+      window.__micro = async () => {
+        const Lib = await import('./lib-optimized.js');
+        const CASES = [
+          { id: 'dots',          opts: { mode: 'dots' } },
+          { id: 'ascii',         opts: { mode: 'ascii' } },
+          { id: 'ascii+scramble',opts: { mode: 'ascii', glyphScramble: 0.3 } },
+          { id: 'symbols',       symbol: true, opts: { mode: 'symbols' } },
+          { id: 'tonemap',       symbol: true, opts: { mode: 'symbols', toneMap: [
+            { min: 0, max: 0.5, primitive: 'symbol', symbol: 'star', scale: 1 },
+            { min: 0.5, max: 1, primitive: 'symbol', symbol: 'star', scale: 0.6, color: '#22aa66' }
+          ] } },
+          { id: 'palette',       opts: { mode: 'dots', colorMode: 'palette' } }
+        ];
+        const out = [];
+        for (const c of CASES) {
+          const host = await makeHost();
+          const fx = new Lib.AgencyDitherFX(host, {
+            ...BASE, ...c.opts, renderer: 'webgl', immediate: true
+          });
+          try {
+            await fx.setSource(DYNAMIC_SOURCE);
+            if (c.symbol) await fx.registerSymbol('star', SYMBOL_SVG);
+            fx.stop();
+            let t = 1000;
+            for (let i = 0; i < 100; i += 1) { fx.render(t); t += 16.7; }
+            const N = 2000;
+            const start = performance.now();
+            for (let i = 0; i < N; i += 1) { fx.render(t); t += 16.7; }
+            const elapsed = performance.now() - start;
+            out.push({ id: c.id, renderer: fx.getStats().renderer, usPerFrame: (elapsed / N) * 1000 });
+          } finally {
+            releaseContext(fx);
+            host.remove();
+          }
         }
         return out;
       };

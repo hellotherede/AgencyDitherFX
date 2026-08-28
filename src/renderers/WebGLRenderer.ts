@@ -38,6 +38,8 @@ uniform float u_glyphCount;
 uniform vec2 u_glyphTile;
 uniform bool u_glyphReady;
 uniform float u_glyphScramble;
+uniform float u_scrambleRoll;
+uniform float u_scrambleShift;
 // Per-cell values that need the integer hash GLSL ES 1.00 cannot express, baked
 // on the CPU. R and A carry a 16-bit random-glyph roll; G and B carry the
 // jitter offsets, which change on their own ten-per-second clock.
@@ -458,8 +460,12 @@ float primitiveCoverage(
     }
     if (u_glyphScramble > 0.0) {
       // The roll is stored as the raw 0..99 integer the Canvas renderer tests.
-      float roll = floor(scramble.x * 255.0 + 0.5) / 100.0;
-      if (roll < u_glyphScramble) index = floor(scramble.y * 255.0 + 0.5);
+      // Both clocks reduce to an offset, applied here so the baked texture
+      // stays valid for the life of the grid.
+      float roll = mod(floor(scramble.x * 255.0 + 0.5) + u_scrambleRoll, 100.0) / 100.0;
+      if (roll < u_glyphScramble) {
+        index = mod(floor(scramble.y * 255.0 + 0.5) + u_scrambleShift, u_glyphCount);
+      }
     }
     return texture2D(u_glyphAtlas, vec2((index + uv.x) / u_glyphCount, uv.y)).a;
   }
@@ -705,6 +711,8 @@ interface WebGLUniforms {
   glyphTile: WebGLUniformLocation;
   glyphReady: WebGLUniformLocation;
   glyphScramble: WebGLUniformLocation;
+  scrambleRoll: WebGLUniformLocation;
+  scrambleShift: WebGLUniformLocation;
   cellData: WebGLUniformLocation;
   glyphRandom: WebGLUniformLocation;
   glyphProbability: WebGLUniformLocation;
@@ -928,7 +936,9 @@ export class WebGLRenderer implements DitherRenderer {
   private readonly symbols = new Map<string, CanvasImageSource>();
   private symbolOrder: string[] = [];
   private symbolCount = 1;
-  private bandKey = '';
+  private symbolStamp = 0;
+  private bandReference: AgencyDitherOptions['toneMap'] | null = null;
+  private bandSymbolStamp = -1;
   private readonly bandRange = new Float32Array(TONE_BANDS * 4);
   private readonly bandStyle = new Float32Array(TONE_BANDS * 4);
   private readonly bandPlacement = new Float32Array(TONE_BANDS * 4);
@@ -1041,7 +1051,7 @@ export class WebGLRenderer implements DitherRenderer {
     this.symbolReady = false;
     this.uploadedSecondary = null;
     this.cellDataKey = '';
-    this.bandKey = '';
+    this.bandReference = null;
     this.paletteKey = '';
     this.uploadedMask = null;
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
@@ -1059,6 +1069,8 @@ export class WebGLRenderer implements DitherRenderer {
       glyphTile: getUniform(gl, this.program, 'u_glyphTile'),
       glyphReady: getUniform(gl, this.program, 'u_glyphReady'),
       glyphScramble: getUniform(gl, this.program, 'u_glyphScramble'),
+      scrambleRoll: getUniform(gl, this.program, 'u_scrambleRoll'),
+      scrambleShift: getUniform(gl, this.program, 'u_scrambleShift'),
       cellData: getUniform(gl, this.program, 'u_cellData'),
       glyphRandom: getUniform(gl, this.program, 'u_glyphRandom'),
       glyphProbability: getUniform(gl, this.program, 'u_glyphProbability'),
@@ -1190,12 +1202,14 @@ export class WebGLRenderer implements DitherRenderer {
   setSymbol(name: string, image: CanvasImageSource): void {
     this.symbols.set(name, image);
     if (!this.symbolOrder.includes(name)) this.symbolOrder.push(name);
+    this.symbolStamp += 1;
     this.uploadSymbols();
   }
 
   removeSymbol(name: string): void {
     this.symbols.delete(name);
     this.symbolOrder = this.symbolOrder.filter(entry => entry !== name);
+    this.symbolStamp += 1;
     this.uploadSymbols();
   }
 
@@ -1334,6 +1348,12 @@ export class WebGLRenderer implements DitherRenderer {
     if (options.mode === 'ascii' && !this.updateGlyphAtlas(options)) {
       warning = 'Glyph atlas too large for this device; Canvas renderer is recommended';
     }
+    // Reduced before upload so the shader's mod stays inside exact float range.
+    gl.uniform1f(this.uniforms.scrambleRoll, Math.floor(time / 70) % 100);
+    gl.uniform1f(
+      this.uniforms.scrambleShift,
+      Math.floor(time / 80) % Math.max(1, this.glyphCount)
+    );
     this.updateNoise(options, time, this.glyphCount);
     gl.uniform1f(this.uniforms.glyphCount, this.glyphCount);
     gl.uniform2f(this.uniforms.glyphTile, this.glyphTileCss, this.glyphTileCss);
@@ -1433,7 +1453,7 @@ export class WebGLRenderer implements DitherRenderer {
       // Glyphs are drawn from the cell centre at roughly cell size and routinely
       // overhang their neighbours.
       options.mode === 'ascii' ||
-      options.mode === 'symbols' ||
+      (options.mode === 'symbols' && options.symbolScale > 1) ||
       // dotScale above 1 pushes the circle past its own cell.
       (options.dotScale > 1 && (options.mode === 'dots' || options.mode === 'halftone')) ||
       // Bands carry their own offset, drift, rotation and scale, any of which
@@ -1522,8 +1542,10 @@ export class WebGLRenderer implements DitherRenderer {
     // multiply by 16807, which overflows what a shader float can hold exactly,
     // so the results are baked here alongside the noise.
     const scrambles = options.mode === 'ascii' && options.glyphScramble > 0;
-    const rollFrame = scrambles ? Math.floor(time / 70) : 0;
-    const shiftFrame = scrambles ? Math.floor(time / 80) : 0;
+    // Only whether scramble is on matters for the bake now; the clocks are
+    // uniforms.
+    const rollFrame = 0;
+    const shiftFrame = scrambles ? 1 : 0;
     const resized = columns !== this.noiseColumns || rows !== this.noiseRows;
     if (
       !resized &&
@@ -1558,8 +1580,8 @@ export class WebGLRenderer implements DitherRenderer {
         if (!scrambles) continue;
         // Stored as the raw integers the Canvas renderer compares, so the
         // shader can recover them exactly rather than through a 0..1 ratio.
-        data[offset + 2] = (index * 16807 + rollFrame) % 100;
-        data[offset + 3] = (index + shiftFrame) % ramp;
+        data[offset + 2] = (index * 16807) % 100;
+        data[offset + 3] = index % ramp;
       }
     }
 
@@ -1690,9 +1712,12 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1f(this.uniforms.bandTime, time * 0.001);
     if (!bands.length) return;
 
-    const key = `${JSON.stringify(bands)}|${this.symbolOrder.join(',')}`;
-    if (key !== this.bandKey) {
-      this.bandKey = key;
+    if (
+      options.toneMap !== this.bandReference ||
+      this.symbolStamp !== this.bandSymbolStamp
+    ) {
+      this.bandReference = options.toneMap;
+      this.bandSymbolStamp = this.symbolStamp;
       const range = this.bandRange;
       const style = this.bandStyle;
       const placement = this.bandPlacement;

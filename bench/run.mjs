@@ -169,6 +169,17 @@ if (args.includes('--diag')) {
   await rm(profile, { recursive: true, force: true }).catch(() => {});
   process.exit(0);
 }
+if (args.includes('--micro')) {
+  const rows = await evaluate('window.__micro()');
+  console.log('\nmain-thread CPU cost of one WebGL frame');
+  console.log('-'.repeat(52));
+  for (const row of rows) {
+    console.log(row.id.padEnd(16) + row.renderer.padEnd(8) + row.usPerFrame.toFixed(1).padStart(9) + ' us');
+  }
+  ws.close(); chrome.kill(); server.close();
+  await rm(profile, { recursive: true, force: true }).catch(() => {});
+  process.exit(0);
+}
 if (RENDERERS) {
   const rows = await evaluate('window.__renderers()');
   console.log('\nCanvas vs WebGL on identical config (luminance delta, 0-255)');
