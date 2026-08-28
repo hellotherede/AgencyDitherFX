@@ -464,7 +464,10 @@
           // colour and then dithers like any other cell.
           { id: 'contain-fit', opts: { mode: 'dots', noiseAmount: 0, fit: 'contain' } },
           { id: 'ascii-scramble',  opts: { mode: 'ascii', noiseAmount: 0, glyphScramble: 0.3 } },
-          { id: 'ascii-scramble-hi', opts: { mode: 'ascii', noiseAmount: 0, glyphScramble: 0.9 } }
+          { id: 'ascii-scramble-hi', opts: { mode: 'ascii', noiseAmount: 0, glyphScramble: 0.9 } },
+          { id: 'glyph-random',   opts: { mode: 'ascii', noiseAmount: 0, glyphSelection: 'random', glyphSeed: 7 } },
+          { id: 'glyph-binary',   opts: { mode: 'ascii', noiseAmount: 0, glyphSelection: 'random', glyphRamp: ' #', glyphProbability: 0.4 } },
+          { id: 'ambient-jitter', opts: { mode: 'dots', noiseAmount: 0, ambientEnabled: true, ambientMode: 'jitter', ambientAmount: 0.3 } }
         ];
         const out = [];
         for (const cfg of CONFIGS) {

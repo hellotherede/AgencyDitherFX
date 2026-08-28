@@ -37,6 +37,12 @@ uniform float u_glyphCount;
 uniform vec2 u_glyphTile;
 uniform bool u_glyphReady;
 uniform float u_glyphScramble;
+// Per-cell values that need the integer hash GLSL ES 1.00 cannot express, baked
+// on the CPU. R and A carry a 16-bit random-glyph roll; G and B carry the
+// jitter offsets, which change on their own ten-per-second clock.
+uniform sampler2D u_cellData;
+uniform bool u_glyphRandom;
+uniform float u_glyphProbability;
 // Up to PALETTE_LIMIT colours in a 1 x N strip. A texture rather than a uniform
 // array because GLSL ES 1.00 does not guarantee dynamic indexing of arrays.
 uniform sampler2D u_palette;
@@ -265,6 +271,9 @@ vec2 cellPosition(vec2 cell, float toned, out float ambientScale) {
       pos += vec2(cos(angle), sin(angle)) * u_ambientAmount * u_cellSize;
     } else if (u_ambientMode == 3) {
       ambientScale = 1.0 + sin(u_ambientElapsed * 2.0 + spatial) * u_ambientAmount * 0.35;
+    } else if (u_ambientMode == 4) {
+      vec4 data = texture2D(u_cellData, (cell + 0.5) / u_gridSize);
+      pos += (data.gb - 0.5) * u_ambientAmount * u_cellSize;
     } else {
       pos.x += cos(u_ambientElapsed + spatial) * u_ambientAmount * u_cellSize.x;
       pos.y += sin(u_ambientElapsed * 0.83 + spatial) * u_ambientAmount * u_cellSize.y;
@@ -340,6 +349,13 @@ float primitiveCoverage(
     vec2 uv = delta / u_glyphTile + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
     float index = floor(dithered * (u_glyphCount - 1.0) + 0.5);
+    if (u_glyphRandom) {
+      vec4 data = texture2D(u_cellData, (cell + 0.5) / u_gridSize);
+      float roll = (data.r * 255.0 * 256.0 + data.a * 255.0) / 65535.0;
+      index = u_glyphCount == 2.0
+        ? (roll < u_glyphProbability ? 1.0 : 0.0)
+        : min(u_glyphCount - 1.0, floor(roll * u_glyphCount));
+    }
     if (u_glyphScramble > 0.0) {
       // The roll is stored as the raw 0..99 integer the Canvas renderer tests.
       float roll = floor(scramble.x * 255.0 + 0.5) / 100.0;
@@ -523,8 +539,7 @@ const AMBIENT: Record<AgencyDitherOptions['ambientMode'], number> = {
   wave: 1,
   orbit: 2,
   pulse: 3,
-  // jitter needs the integer hash the shader cannot reproduce, so it stays on Canvas.
-  jitter: 0
+  jitter: 4
 };
 
 const clamp = (value: number, min = 0, max = 1): number =>
@@ -549,6 +564,9 @@ interface WebGLUniforms {
   glyphTile: WebGLUniformLocation;
   glyphReady: WebGLUniformLocation;
   glyphScramble: WebGLUniformLocation;
+  cellData: WebGLUniformLocation;
+  glyphRandom: WebGLUniformLocation;
+  glyphProbability: WebGLUniformLocation;
   palette: WebGLUniformLocation;
   paletteCount: WebGLUniformLocation;
   paletteMix: WebGLUniformLocation;
@@ -724,9 +742,6 @@ export class WebGLRenderer implements DitherRenderer {
     if (!SUPPORTED_MODES.has(options.mode)) {
       return MODE_REASON[options.mode] ?? UNSUPPORTED_MODE;
     }
-    if (options.glyphSelection !== 'tone') {
-      return 'Random glyph selection requires the Canvas renderer';
-    }
     if (options.mode === 'ascii' && options.glyphRamp.length > 255) {
       return 'Glyph ramps over 255 entries require the Canvas renderer';
     }
@@ -738,17 +753,6 @@ export class WebGLRenderer implements DitherRenderer {
       return `Palettes over ${PALETTE_LIMIT} colours require the Canvas renderer`;
     }
     if (options.blur > 0) return 'Source blur requires the Canvas renderer';
-    // Rotation, displacement, ripple, pointer push and the drift, wave, orbit
-    // and pulse ambient modes are all expressed in the shader. Only jitter,
-    // which needs the integer hash GLSL ES 1.00 cannot reproduce, still falls
-    // back to Canvas.
-    if (
-      options.ambientEnabled &&
-      options.ambientAmount > 0 &&
-      options.ambientMode === 'jitter'
-    ) {
-      return 'Jitter ambient motion requires the Canvas renderer';
-    }
     return '';
   }
 
@@ -763,6 +767,9 @@ export class WebGLRenderer implements DitherRenderer {
   private maskTexture!: WebGLTexture;
   private uploadedMask: SourceFrame | null = null;
   private secondaryTexture!: WebGLTexture;
+  private cellDataTexture!: WebGLTexture;
+  private cellData = new Uint8Array(0);
+  private cellDataKey = '';
   private uploadedSecondary: SourceFrame | null = null;
   private paletteKey = '';
   private glyphKey = '';
@@ -858,7 +865,11 @@ export class WebGLRenderer implements DitherRenderer {
     this.secondaryTexture = gl.createTexture() ?? (() => {
       throw new Error('AgencyDitherFX could not create a WebGL texture.');
     })();
+    this.cellDataTexture = gl.createTexture() ?? (() => {
+      throw new Error('AgencyDitherFX could not create a WebGL texture.');
+    })();
     this.uploadedSecondary = null;
+    this.cellDataKey = '';
     this.paletteKey = '';
     this.uploadedMask = null;
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
@@ -876,6 +887,9 @@ export class WebGLRenderer implements DitherRenderer {
       glyphTile: getUniform(gl, this.program, 'u_glyphTile'),
       glyphReady: getUniform(gl, this.program, 'u_glyphReady'),
       glyphScramble: getUniform(gl, this.program, 'u_glyphScramble'),
+      cellData: getUniform(gl, this.program, 'u_cellData'),
+      glyphRandom: getUniform(gl, this.program, 'u_glyphRandom'),
+      glyphProbability: getUniform(gl, this.program, 'u_glyphProbability'),
       palette: getUniform(gl, this.program, 'u_palette'),
       paletteCount: getUniform(gl, this.program, 'u_paletteCount'),
       paletteMix: getUniform(gl, this.program, 'u_paletteMix'),
@@ -958,6 +972,12 @@ export class WebGLRenderer implements DitherRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, this.cellDataTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.paletteTexture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -1009,6 +1029,7 @@ export class WebGLRenderer implements DitherRenderer {
       this.gl.deleteTexture(this.paletteTexture);
       this.gl.deleteTexture(this.maskTexture);
       this.gl.deleteTexture(this.secondaryTexture);
+      this.gl.deleteTexture(this.cellDataTexture);
       this.gl.deleteProgram(this.program);
       // Frees the backing context immediately instead of waiting for GC, which
       // matters when instances are created and torn down across route changes.
@@ -1084,6 +1105,12 @@ export class WebGLRenderer implements DitherRenderer {
       this.uniforms.glyphScramble,
       options.mode === 'ascii' ? options.glyphScramble : 0
     );
+    this.updateCellData(options, time);
+    gl.uniform1i(
+      this.uniforms.glyphRandom,
+      options.glyphSelection === 'random' ? 1 : 0
+    );
+    gl.uniform1f(this.uniforms.glyphProbability, clamp(options.glyphProbability));
     this.updatePalette(options);
     gl.uniform1f(
       this.uniforms.paletteCount,
@@ -1110,6 +1137,7 @@ export class WebGLRenderer implements DitherRenderer {
     gl.uniform1i(this.uniforms.palette, 3);
     gl.uniform1i(this.uniforms.mask, 4);
     gl.uniform1i(this.uniforms.secondary, 5);
+    gl.uniform1i(this.uniforms.cellData, 6);
     gl.uniform2f(this.uniforms.cssSize, this.cssWidth, this.cssHeight);
     gl.uniform2f(this.uniforms.gridSize, this.columns, this.rows);
     gl.uniform4f(this.uniforms.drawRect, drawX, drawY, drawWidth, drawHeight);
@@ -1144,10 +1172,7 @@ export class WebGLRenderer implements DitherRenderer {
 
     // Motion. Each of these can push a primitive out of its own cell, so the
     // neighbourhood search is only switched on when one of them is in play.
-    const ambientAmount =
-      options.ambientEnabled && options.ambientMode !== 'jitter'
-        ? options.ambientAmount
-        : 0;
+    const ambientAmount = options.ambientEnabled ? options.ambientAmount : 0;
     const rippleAge = pointer.rippleStarted > 0
       ? (time - pointer.rippleStarted) / 1000
       : 0;
@@ -1347,6 +1372,55 @@ export class WebGLRenderer implements DitherRenderer {
     gl.activeTexture(gl.TEXTURE0);
     this.glyphReady = true;
     return true;
+  }
+
+  /**
+   * Bakes the per-cell values that depend on the integer hash: the random-glyph
+   * roll, at 16 bits so a tweened glyphProbability does not step, and the jitter
+   * offsets, which advance ten times a second.
+   */
+  private updateCellData(options: AgencyDitherOptions, time: number): void {
+    const columns = this.columns;
+    const rows = this.rows;
+    const random = options.glyphSelection === 'random';
+    const jitters =
+      options.ambientEnabled &&
+      options.ambientAmount > 0 &&
+      options.ambientMode === 'jitter';
+    const seed = Math.round(options.glyphSeed);
+    const step = jitters ? Math.floor(time * 0.001 * options.ambientSpeed * 10) : 0;
+    const key = `${columns}x${rows}|${random ? seed : ''}|${jitters ? step : ''}`;
+    if (key === this.cellDataKey) return;
+    this.cellDataKey = key;
+
+    if (this.cellData.length !== columns * rows * 4) {
+      this.cellData = new Uint8Array(columns * rows * 4);
+    }
+    const data = this.cellData;
+    let offset = 0;
+    let index = 0;
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < columns; x += 1, offset += 4, index += 1) {
+        if (random) {
+          const roll = Math.min(65535, Math.round(hash(x, y, seed) * 65535));
+          data[offset] = roll >> 8;
+          data[offset + 3] = roll & 255;
+        }
+        if (!jitters) continue;
+        const hashX = Math.imul(index + step * 101, 2654435761);
+        const hashY = Math.imul(index + step * 211, 1597334677);
+        data[offset + 1] = (((hashX ^ (hashX >>> 16)) >>> 0) / 4294967295) * 255;
+        data[offset + 2] = (((hashY ^ (hashY >>> 16)) >>> 0) / 4294967295) * 255;
+      }
+    }
+
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, this.cellDataTexture);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA, columns, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, data
+    );
+    gl.activeTexture(gl.TEXTURE0);
   }
 
   /** Uploads the mask and publishes its placement and threshold uniforms. */
