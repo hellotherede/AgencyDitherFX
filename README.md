@@ -41,15 +41,16 @@ Not implemented yet:
 
 - Full WebGL feature parity. The `webgl` renderer is the default and covers
   every mode, every colour mode, every realtime-safe algorithm, every motion
-  control, luminance masks, secondary-source blending, glyph scramble and
-  random glyph selection. What still selects Canvas automatically, reporting
-  the reason through `warning`:
+  control, luminance masks, secondary-source blending, tone maps with per-band
+  symbols, glyph scramble and random glyph selection. What still selects Canvas
+  automatically, reporting the reason through `warning`:
 
   | Feature                  | Why |
   | ------------------------ | --- |
   | Error diffusion          | Each pixel depends on its predecessors, which a fragment shader cannot express |
-  | Tone maps                | Per-band primitive, colour, scale, offset and motion, including per-band symbols |
   | Source blur              | Needs a separate blur pass |
+  | Per-band glyphs          | An arbitrary character is not in the ramp atlas |
+  | Tone maps over 7 bands   | The band uniform arrays hold seven |
   | Palettes over 16 colours | The palette texture is 16 wide |
   | Glyph ramps over 255     | The scramble channel is one byte |
 - CPU error diffusion is throttled, but not moved into a Web Worker yet; the
@@ -848,6 +849,8 @@ own cell:
 | Two-source blend             |  39 fps | 181 fps |
 | Glyph scramble               |  48 fps | 181 fps |
 | SVG symbols                  | 3.4 fps | 181 fps |
+| Tone-mapped symbols          | 4.6 fps | 181 fps |
+| Tone-mapped symbols          | 4.6 fps | 181 fps |
 
 The neighbourhood search costs about 0.3 ms and is switched off entirely when no
 motion is active.

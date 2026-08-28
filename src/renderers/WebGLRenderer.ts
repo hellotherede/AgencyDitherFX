@@ -22,6 +22,7 @@ const FRAGMENT_SHADER = `
 precision mediump float;
 
 #define PALETTE_LIMIT 16.0
+#define TONE_BANDS 7
 
 uniform sampler2D u_source;
 // Per-cell noise baked on the CPU with the same integer hash the Canvas
@@ -47,6 +48,21 @@ uniform bool u_glyphRandom;
 uniform sampler2D u_symbol;
 uniform bool u_symbolReady;
 uniform float u_symbolScale;
+uniform float u_symbolCount;
+
+// Tone bands, packed four floats at a time. Uniform arrays rather than another
+// texture, because WebGL1 only guarantees eight texture units and all eight are
+// already in use. A loop index is a constant-index-expression, so indexing these
+// inside a fixed-bound loop is legal in GLSL ES 1.00.
+uniform int u_bandCount;
+uniform float u_bandTime;
+// x = min, y = max, z = primitive id, w = scale
+uniform vec4 u_bandRange[TONE_BANDS];
+// x = rotation, y = revealOffset, z = motionAmount, w = motionSpeed
+uniform vec4 u_bandStyle[TONE_BANDS];
+// x = offsetX, y = offsetY, z = symbol index, w = 1 when the band sets a colour
+uniform vec4 u_bandPlacement[TONE_BANDS];
+uniform vec4 u_bandColor[TONE_BANDS];
 uniform float u_glyphProbability;
 // Up to PALETTE_LIMIT colours in a 1 x N strip. A texture rather than a uniform
 // array because GLSL ES 1.00 does not guarantee dynamic indexing of arrays.
@@ -159,8 +175,8 @@ float localThreshold(vec2 cell, float base, vec2 noise) {
   return threshold;
 }
 
-float revealForCell(vec2 cell) {
-  float progress = clamp(u_revealProgress, 0.0, 1.0);
+float revealForCell(vec2 cell, float revealOffset) {
+  float progress = clamp(u_revealProgress - revealOffset, 0.0, 1.0);
   if (progress >= 1.0) return progress;
   if (progress <= 0.0) return 0.0;
 
@@ -202,6 +218,25 @@ float revealForCell(vec2 cell) {
   float duration = max(0.001, 1.0 - spread);
   float local = clamp((progress - start) / duration, 0.0, 1.0);
   return 1.0 - pow(1.0 - local, 3.0);
+}
+
+bool bandFor(
+  float toned, out vec4 range, out vec4 style, out vec4 placement, out vec4 color
+) {
+  if (u_bandCount == 0) return false;
+  float q = floor(clamp(toned, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
+  for (int i = 0; i < TONE_BANDS; i++) {
+    if (i >= u_bandCount) break;
+    vec4 candidate = u_bandRange[i];
+    if (q >= candidate.x && q <= candidate.y) {
+      range = candidate;
+      style = u_bandStyle[i];
+      placement = u_bandPlacement[i];
+      color = u_bandColor[i];
+      return true;
+    }
+  }
+  return false;
 }
 
 float maskAlpha(vec2 cell) {
@@ -262,9 +297,21 @@ bool cellValue(
 
 // Where a cell's primitive is actually drawn, mirroring the Canvas renderer's
 // per-cell motion maths.
-vec2 cellPosition(vec2 cell, float toned, out float ambientScale) {
+vec2 cellPosition(
+  vec2 cell, float toned, vec4 style, vec4 placement, bool banded,
+  out float ambientScale
+) {
   vec2 pos = (cell + 0.5) * u_cellSize;
   ambientScale = 1.0;
+
+  if (banded) {
+    pos += placement.xy * u_cellSize;
+    if (style.z > 0.0) {
+      float phase = u_bandTime * style.w + cell.x * 0.19 + cell.y * 0.11;
+      pos.x += cos(phase) * style.z * u_cellSize.x;
+      pos.y += sin(phase * 0.83) * style.z * u_cellSize.y;
+    }
+  }
 
   if (u_ambientAmount > 0.0) {
     float spatial = (cell.x + cell.y * 0.73) * u_ambientFrequency;
@@ -313,10 +360,12 @@ vec2 cellPosition(vec2 cell, float toned, out float ambientScale) {
 // Antialiased coverage of this fragment by the primitive belonging to a cell.
 float primitiveCoverage(
   vec2 cell, vec2 css, out vec3 rgb, out float outReveal, out float outToned,
-  out vec3 symbolRgb, out bool symbolInk
+  out vec3 symbolRgb, out bool symbolInk, out vec4 bandColor, out bool bandTinted
 ) {
   symbolRgb = vec3(0.0);
   symbolInk = false;
+  bandColor = vec4(0.0);
+  bandTinted = false;
   outReveal = 0.0;
   outToned = 0.0;
   if (cell.x < 0.0 || cell.y < 0.0 || cell.x >= u_gridSize.x || cell.y >= u_gridSize.y) {
@@ -328,13 +377,31 @@ float primitiveCoverage(
   vec2 scramble;
   if (!cellValue(cell, dithered, toned, rgb, mask, scramble)) return 0.0;
   if (mask <= 0.0) return 0.0;
-  float reveal = revealForCell(cell) * mask;
+  float reveal = revealForCell(cell, 0.0) * mask;
   if (reveal <= 0.0) return 0.0;
 
   outToned = toned;
+
+  vec4 range = vec4(0.0);
+  vec4 style = vec4(0.0);
+  vec4 placement = vec4(0.0);
+  vec4 color = vec4(0.0);
+  bool banded = bandFor(toned, range, style, placement, color);
+  if (banded) {
+    // A band can withhold the cell entirely, and shifts its own reveal.
+    if (range.z == 0.0) return 0.0;
+    reveal = revealForCell(cell, style.y) * mask;
+    if (reveal <= 0.0) return 0.0;
+    outReveal = reveal;
+    bandColor = color;
+    bandTinted = placement.w > 0.5;
+  }
+
   float ambientScale;
-  vec2 pos = cellPosition(cell, toned, ambientScale);
-  float scale = (0.15 + dithered * 0.85) * (0.35 + reveal * 0.65) * ambientScale;
+  vec2 pos = cellPosition(cell, toned, style, placement, banded, ambientScale);
+  float bandScale = banded ? range.w : 1.0;
+  float scale =
+    bandScale * (0.15 + dithered * 0.85) * (0.35 + reveal * 0.65) * ambientScale;
   vec2 delta = css - pos;
   outReveal = reveal;
 
@@ -343,6 +410,16 @@ float primitiveCoverage(
   if (mode == 5) {
     mode = toned < u_primitiveMix * 0.5 ? 2 : (toned < 0.75 ? 1 : 4);
   }
+  // 1 dot, 2 block, 3 glyph, 4 symbol, 5 line in the band encoding.
+  if (banded) {
+    if (range.z == 1.0) mode = 1;
+    else if (range.z == 2.0) mode = 2;
+    else if (range.z == 3.0) mode = 4;
+    else if (range.z == 4.0) mode = 6;
+    else if (range.z == 5.0) mode = 7;
+  }
+  float bandSymbol = banded ? placement.z : 0.0;
+  float bandRotation = banded ? style.x : 0.0;
 
   if (mode == 1 || mode == 3) {
     float radius = min(u_cellSize.x, u_cellSize.y) * 0.5 * scale * u_dotScale;
@@ -357,7 +434,9 @@ float primitiveCoverage(
     if (halfSize.x <= 0.0 || halfSize.y <= 0.0) return 0.0;
     vec2 uv = delta / (halfSize * 2.0) + 0.5;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
-    vec4 texel = texture2D(u_symbol, uv);
+    vec4 texel = texture2D(
+      u_symbol, vec2((bandSymbol + uv.x) / u_symbolCount, uv.y)
+    );
     symbolRgb = texel.rgb;
     symbolInk = true;
     return texel.a;
@@ -385,9 +464,10 @@ float primitiveCoverage(
     return texture2D(u_glyphAtlas, vec2((index + uv.x) / u_glyphCount, uv.y)).a;
   }
 
-  if (u_rotation != 0.0) {
-    float c = cos(-u_rotation);
-    float s = sin(-u_rotation);
+  float rotation = u_rotation + bandRotation;
+  if (rotation != 0.0) {
+    float c = cos(-rotation);
+    float s = sin(-rotation);
     delta = vec2(delta.x * c - delta.y * s, delta.x * s + delta.y * c);
   }
   vec2 halfSize = u_cellSize * 0.5 * scale;
@@ -440,7 +520,7 @@ void main() {
       gl_FragColor = background;
       return;
     }
-    float reveal = revealForCell(cell);
+    float reveal = revealForCell(cell, 0.0);
     gl_FragColor = reveal <= 0.0 ? background : vec4(vec3(dithered), reveal);
     return;
   }
@@ -451,6 +531,8 @@ void main() {
   vec3 bestRgb = vec3(0.0);
   vec3 bestSymbolRgb = vec3(0.0);
   bool bestSymbolInk = false;
+  vec4 bestBandColor = vec4(0.0);
+  bool bestBandTinted = false;
 
   for (int dy = -1; dy <= 1; dy++) {
     for (int dx = -1; dx <= 1; dx++) {
@@ -462,8 +544,11 @@ void main() {
       float toned;
       vec3 symbolRgb;
       bool symbolInk;
+      vec4 bandColor;
+      bool bandTinted;
       float coverage = primitiveCoverage(
-        cell + vec2(float(dx), float(dy)), css, rgb, reveal, toned, symbolRgb, symbolInk
+        cell + vec2(float(dx), float(dy)), css, rgb, reveal, toned,
+        symbolRgb, symbolInk, bandColor, bandTinted
       );
       if (coverage > bestCoverage) {
         bestCoverage = coverage;
@@ -472,18 +557,25 @@ void main() {
         bestRgb = rgb;
         bestSymbolRgb = symbolRgb;
         bestSymbolInk = symbolInk;
+        bestBandColor = bandColor;
+        bestBandTinted = bandTinted;
       }
     }
   }
 
-  if (bestCoverage <= 0.0 || (u_foregroundTransparent && u_colorMode == 0)) {
+  if (
+    bestCoverage <= 0.0 ||
+    (u_foregroundTransparent && u_colorMode == 0 && !bestBandTinted)
+  ) {
     gl_FragColor = background;
     return;
   }
 
-  vec4 ink = bestSymbolInk
-    ? vec4(bestSymbolRgb, u_foreground.a)
-    : inkColor(bestRgb, bestToned);
+  vec4 ink = bestBandTinted
+    ? vec4(bestBandColor.rgb, u_foreground.a)
+    : (bestSymbolInk
+      ? vec4(bestSymbolRgb, u_foreground.a)
+      : inkColor(bestRgb, bestToned));
   // Source-over of the ink onto the background, matching the Canvas renderer
   // filling the background first and then drawing at globalAlpha = reveal.
   float srcAlpha = bestCoverage * bestReveal * ink.a;
@@ -547,8 +639,24 @@ const COLOR_MODES: Record<AgencyDitherOptions['colorMode'], number> = {
 /** Matches PALETTE_LIMIT in the shader. */
 const PALETTE_LIMIT = 16;
 
-/** Symbols are rasterised to this square before upload. */
-const SYMBOL_TEXTURE_SIZE = 256;
+/** Symbols are rasterised to this square before being packed into the atlas. */
+const SYMBOL_TEXTURE_SIZE = 128;
+
+/** Tone maps carry at most seven bands, so eight symbols covers every case. */
+const SYMBOL_LIMIT = 8;
+
+/** Matches TONE_BANDS in the shader. */
+const TONE_BANDS = 7;
+
+/** Band primitive ids, matching the shader's encoding. */
+const PRIMITIVES: Record<string, number> = {
+  none: 0,
+  dot: 1,
+  block: 2,
+  glyph: 3,
+  symbol: 4,
+  line: 5
+};
 
 const SUFFIX = ' requires the Canvas renderer';
 const UNSUPPORTED_MODE = `This mode${SUFFIX}`;
@@ -603,6 +711,13 @@ interface WebGLUniforms {
   symbol: WebGLUniformLocation;
   symbolReady: WebGLUniformLocation;
   symbolScale: WebGLUniformLocation;
+  symbolCount: WebGLUniformLocation;
+  bandCount: WebGLUniformLocation;
+  bandTime: WebGLUniformLocation;
+  bandRange: WebGLUniformLocation;
+  bandStyle: WebGLUniformLocation;
+  bandPlacement: WebGLUniformLocation;
+  bandColor: WebGLUniformLocation;
   palette: WebGLUniformLocation;
   paletteCount: WebGLUniformLocation;
   paletteMix: WebGLUniformLocation;
@@ -784,7 +899,12 @@ export class WebGLRenderer implements DitherRenderer {
     if (!(options.algorithm in ALGORITHMS)) {
       return ALGORITHM_REASON[options.algorithm] ?? UNSUPPORTED_ALGORITHM;
     }
-    if (options.toneMap.length) return 'Tone maps require the Canvas renderer';
+    if (options.toneMap.length > TONE_BANDS) {
+      return `Tone maps over ${TONE_BANDS} bands require the Canvas renderer`;
+    }
+    if (options.toneMap.some(band => band.glyph !== undefined)) {
+      return 'Per-band glyphs require the Canvas renderer';
+    }
     if (options.palette.length > PALETTE_LIMIT) {
       return `Palettes over ${PALETTE_LIMIT} colours require the Canvas renderer`;
     }
@@ -806,7 +926,13 @@ export class WebGLRenderer implements DitherRenderer {
   private cellDataTexture!: WebGLTexture;
   private symbolTexture!: WebGLTexture;
   private readonly symbols = new Map<string, CanvasImageSource>();
-  private symbolName = '';
+  private symbolOrder: string[] = [];
+  private symbolCount = 1;
+  private bandKey = '';
+  private readonly bandRange = new Float32Array(TONE_BANDS * 4);
+  private readonly bandStyle = new Float32Array(TONE_BANDS * 4);
+  private readonly bandPlacement = new Float32Array(TONE_BANDS * 4);
+  private readonly bandColor = new Float32Array(TONE_BANDS * 4);
   private symbolReady = false;
   private cellData = new Uint8Array(0);
   private cellDataKey = '';
@@ -915,6 +1041,7 @@ export class WebGLRenderer implements DitherRenderer {
     this.symbolReady = false;
     this.uploadedSecondary = null;
     this.cellDataKey = '';
+    this.bandKey = '';
     this.paletteKey = '';
     this.uploadedMask = null;
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
@@ -938,6 +1065,13 @@ export class WebGLRenderer implements DitherRenderer {
       symbol: getUniform(gl, this.program, 'u_symbol'),
       symbolReady: getUniform(gl, this.program, 'u_symbolReady'),
       symbolScale: getUniform(gl, this.program, 'u_symbolScale'),
+      symbolCount: getUniform(gl, this.program, 'u_symbolCount'),
+      bandCount: getUniform(gl, this.program, 'u_bandCount'),
+      bandTime: getUniform(gl, this.program, 'u_bandTime'),
+      bandRange: getUniform(gl, this.program, 'u_bandRange[0]'),
+      bandStyle: getUniform(gl, this.program, 'u_bandStyle[0]'),
+      bandPlacement: getUniform(gl, this.program, 'u_bandPlacement[0]'),
+      bandColor: getUniform(gl, this.program, 'u_bandColor[0]'),
       palette: getUniform(gl, this.program, 'u_palette'),
       paletteCount: getUniform(gl, this.program, 'u_paletteCount'),
       paletteMix: getUniform(gl, this.program, 'u_paletteMix'),
@@ -1055,23 +1189,24 @@ export class WebGLRenderer implements DitherRenderer {
 
   setSymbol(name: string, image: CanvasImageSource): void {
     this.symbols.set(name, image);
-    // Only the first symbol is reachable without a tone map, and a tone map
-    // still selects Canvas, so that is the one that gets uploaded.
-    if (this.symbolName && this.symbolName !== name) return;
-    this.symbolName = name;
-    this.uploadSymbol(image);
+    if (!this.symbolOrder.includes(name)) this.symbolOrder.push(name);
+    this.uploadSymbols();
   }
 
   removeSymbol(name: string): void {
     this.symbols.delete(name);
-    if (this.symbolName !== name) return;
-    const next = this.symbols.entries().next().value;
-    this.symbolName = next ? next[0] : '';
-    if (next) this.uploadSymbol(next[1]);
-    else this.symbolReady = false;
+    this.symbolOrder = this.symbolOrder.filter(entry => entry !== name);
+    this.uploadSymbols();
   }
 
-  private uploadSymbol(image: CanvasImageSource): void {
+  /** Index of a named symbol in the atlas, or 0 when it is not registered. */
+  private symbolIndex(name: string | undefined): number {
+    if (!name) return 0;
+    const found = this.symbolOrder.indexOf(name);
+    return found < 0 ? 0 : Math.min(found, SYMBOL_LIMIT - 1);
+  }
+
+  private uploadSymbols(): void {
     if (this.contextLost) return;
     const gl = this.gl;
     this.symbolReady = false;
@@ -1080,13 +1215,24 @@ export class WebGLRenderer implements DitherRenderer {
       // image straight to texImage2D: an SVG element carries no reliable
       // intrinsic size, and uploading one produced an incomplete texture that
       // sampled as opaque black.
+      const names = this.symbolOrder.slice(0, SYMBOL_LIMIT);
+      if (!names.length) return;
       const canvas = document.createElement('canvas');
-      canvas.width = SYMBOL_TEXTURE_SIZE;
+      canvas.width = SYMBOL_TEXTURE_SIZE * names.length;
       canvas.height = SYMBOL_TEXTURE_SIZE;
       const context = canvas.getContext('2d');
       if (!context) return;
-      context.clearRect(0, 0, SYMBOL_TEXTURE_SIZE, SYMBOL_TEXTURE_SIZE);
-      context.drawImage(image, 0, 0, SYMBOL_TEXTURE_SIZE, SYMBOL_TEXTURE_SIZE);
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      names.forEach((name, slot) => {
+        const image = this.symbols.get(name);
+        if (!image) return;
+        context.drawImage(
+          image,
+          slot * SYMBOL_TEXTURE_SIZE, 0,
+          SYMBOL_TEXTURE_SIZE, SYMBOL_TEXTURE_SIZE
+        );
+      });
+      this.symbolCount = names.length;
 
       gl.activeTexture(gl.TEXTURE7);
       gl.bindTexture(gl.TEXTURE_2D, this.symbolTexture);
@@ -1207,6 +1353,7 @@ export class WebGLRenderer implements DitherRenderer {
       warning = 'No symbol is registered, so nothing is drawn';
     }
     gl.uniform1f(this.uniforms.symbolScale, options.symbolScale);
+    gl.uniform1f(this.uniforms.symbolCount, Math.max(1, this.symbolCount));
     this.updatePalette(options);
     gl.uniform1f(
       this.uniforms.paletteCount,
@@ -1218,6 +1365,7 @@ export class WebGLRenderer implements DitherRenderer {
       options.foregroundTransparent ? 1 : 0
     );
     gl.uniform1f(this.uniforms.primitiveMix, options.primitiveMix);
+    this.updateBands(options, time);
     this.updateMask(options, mask);
     this.updateSecondary(options, secondary);
 
@@ -1285,8 +1433,18 @@ export class WebGLRenderer implements DitherRenderer {
       // Glyphs are drawn from the cell centre at roughly cell size and routinely
       // overhang their neighbours.
       options.mode === 'ascii' ||
+      options.mode === 'symbols' ||
       // dotScale above 1 pushes the circle past its own cell.
-      (options.dotScale > 1 && (options.mode === 'dots' || options.mode === 'halftone'));
+      (options.dotScale > 1 && (options.mode === 'dots' || options.mode === 'halftone')) ||
+      // Bands carry their own offset, drift, rotation and scale, any of which
+      // can put a primitive outside the cell it belongs to.
+      options.toneMap.some(band =>
+        (band.offsetX ?? 0) !== 0 ||
+        (band.offsetY ?? 0) !== 0 ||
+        (band.motionAmount ?? 0) > 0 ||
+        (band.rotation ?? 0) !== 0 ||
+        (band.scale ?? 1) > 1
+      );
 
     gl.uniform1i(this.uniforms.neighborhood, moves ? 1 : 0);
     gl.uniform1f(this.uniforms.rotation, options.rotation * Math.PI / 180);
@@ -1518,6 +1676,54 @@ export class WebGLRenderer implements DitherRenderer {
       gl.TEXTURE_2D, 0, gl.RGBA, columns, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, data
     );
     gl.activeTexture(gl.TEXTURE0);
+  }
+
+  /**
+   * Packs the tone map into the band uniform arrays. Bands are art direction,
+   * so they change rarely; the packed arrays are rebuilt only when the tone map
+   * reference or a symbol registration changes.
+   */
+  private updateBands(options: AgencyDitherOptions, time: number): void {
+    const gl = this.gl;
+    const bands = options.toneMap.slice(0, TONE_BANDS);
+    gl.uniform1i(this.uniforms.bandCount, bands.length);
+    gl.uniform1f(this.uniforms.bandTime, time * 0.001);
+    if (!bands.length) return;
+
+    const key = `${JSON.stringify(bands)}|${this.symbolOrder.join(',')}`;
+    if (key !== this.bandKey) {
+      this.bandKey = key;
+      const range = this.bandRange;
+      const style = this.bandStyle;
+      const placement = this.bandPlacement;
+      const color = this.bandColor;
+      for (let index = 0; index < bands.length; index += 1) {
+        const band = bands[index]!;
+        const slot = index * 4;
+        range[slot] = band.min;
+        range[slot + 1] = band.max;
+        range[slot + 2] = PRIMITIVES[band.primitive] ?? 0;
+        range[slot + 3] = band.scale ?? 1;
+        style[slot] = (band.rotation ?? 0) * Math.PI / 180;
+        style[slot + 1] = band.revealOffset ?? 0;
+        style[slot + 2] = band.motionAmount ?? 0;
+        style[slot + 3] = band.motionSpeed ?? 1;
+        placement[slot] = band.offsetX ?? 0;
+        placement[slot + 1] = band.offsetY ?? 0;
+        placement[slot + 2] = this.symbolIndex(band.symbol);
+        placement[slot + 3] = band.color ? 1 : 0;
+        const [r, g, b] = band.color ? rgba(band.color) : [0, 0, 0];
+        color[slot] = r;
+        color[slot + 1] = g;
+        color[slot + 2] = b;
+        color[slot + 3] = 1;
+      }
+    }
+
+    gl.uniform4fv(this.uniforms.bandRange, this.bandRange);
+    gl.uniform4fv(this.uniforms.bandStyle, this.bandStyle);
+    gl.uniform4fv(this.uniforms.bandPlacement, this.bandPlacement);
+    gl.uniform4fv(this.uniforms.bandColor, this.bandColor);
   }
 
   /** Uploads the mask and publishes its placement and threshold uniforms. */
