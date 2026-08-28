@@ -19,3 +19,23 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+
+  renderers:
+    # Unit tests cannot see a shader regression: a broken shader falls back to
+    # Canvas and still renders, just slowly and differently. These gates drive a
+    # real browser and compare the two renderers against each other.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:lib
+      - name: Stage the build for the harness
+        run: cp dist/agency-dither-fx.js bench/lib-optimized.js
+      - name: Canvas and WebGL agree, and WebGL is actually used
+        run: node bench/run.mjs --headless --renderers --gate
+      - name: A transparent WebGL frame clears instead of accumulating
+        run: node bench/run.mjs --headless --correctness

@@ -11,12 +11,19 @@ const ROOT = resolve(import.meta.dirname, '..');
 const PORT = 8931;
 const DEBUG_PORT = 9333;
 
+// CHROME_PATH wins, so CI can point at whatever the runner ships.
 const CHROME_CANDIDATES = [
+  process.env.CHROME_PATH,
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Microsoft/Edge/Application/msedge.exe'
-];
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium-browser',
+  '/usr/bin/chromium',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+].filter(Boolean);
 
 const MIME = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
@@ -36,6 +43,10 @@ const OUT = flag('out', '');
 const VERIFY = args.includes('--verify');
 const CORRECTNESS = args.includes('--correctness');
 const RENDERERS = args.includes('--renderers');
+// As a gate, a shader regression shows up either as a fallback to Canvas or as
+// a jump in the share of cells the two renderers disagree about.
+const GATE = args.includes('--gate');
+const GATE_LIMIT = Number(flag('gate-limit', 2));
 const BATCH = flag('batch', '');
 
 // ---------------------------------------------------------------- server
@@ -75,7 +86,17 @@ const chromeArgs = [
   '--window-position=40,40',
   `http://127.0.0.1:${PORT}/bench/bench.html`
 ];
-if (HEADLESS) chromeArgs.unshift('--headless=new', '--hide-scrollbars');
+if (HEADLESS) {
+  chromeArgs.unshift(
+    '--headless=new',
+    '--hide-scrollbars',
+    // A CI runner has no GPU; SwiftShader still exercises the shader paths.
+    '--use-gl=angle',
+    '--use-angle=swiftshader',
+    '--enable-unsafe-swiftshader',
+    '--no-sandbox'
+  );
+}
 
 const chrome = spawn(chromePath, chromeArgs, { stdio: 'ignore' });
 
@@ -201,9 +222,29 @@ if (RENDERERS) {
       ` >128:${row.pct128.toFixed(1).padStart(5)}%`
     );
   }
+  let failures = 0;
+  if (GATE) {
+    for (const row of rows) {
+      if (!row.actual.endsWith('/webgl')) {
+        console.error(`FAIL ${row.id}: expected WebGL, got ${row.actual}`);
+        failures += 1;
+      } else if (row.pct128 > GATE_LIMIT) {
+        console.error(
+          `FAIL ${row.id}: ${row.pct128.toFixed(2)}% of cells disagree ` +
+          `(limit ${GATE_LIMIT}%)`
+        );
+        failures += 1;
+      }
+    }
+    console.log(
+      failures
+        ? `\n${failures} scenario(s) failed`
+        : '\nall scenarios within limits'
+    );
+  }
   ws.close(); chrome.kill(); server.close();
   await rm(profile, { recursive: true, force: true }).catch(() => {});
-  process.exit(0);
+  process.exit(failures ? 1 : 0);
 }
 if (CORRECTNESS) {
   const rows = await evaluate('window.__correctness()');

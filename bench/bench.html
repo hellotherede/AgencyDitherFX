@@ -389,12 +389,12 @@
       // over the framebuffer instead of replacing it, a src alpha of 0 leaves
       // the PREVIOUS frame visible, so a reveal animation never clears.
       window.__correctness = async () => {
-        const [A, B] = await Promise.all([
-          import('./lib-baseline.js'),
-          import('./lib-optimized.js')
-        ]);
+        const B = await import('./lib-optimized.js');
+        // The baseline is a local build artifact; CI only has the current one.
+        const A = await import('./lib-baseline.js').catch(() => null);
+        const libs = A ? [['baseline', A], ['optimized', B]] : [['optimized', B]];
         const out = [];
-        for (const [name, Lib] of [['baseline', A], ['optimized', B]]) {
+        for (const [name, Lib] of libs) {
           const host = await makeHost();
           const fx = new Lib.AgencyDitherFX(host, {
             ...BASE,
@@ -506,6 +506,15 @@
             { min: 0, max: 0.5, primitive: 'dot', scale: 1, offsetX: 0.2, offsetY: -0.1 },
             { min: 0.5, max: 1, primitive: 'block', scale: 0.6, rotation: 25, color: '#3355ff' }
           ] } },
+          // The shipped Binary Signal Mask preset, minus its renderer pin.
+          { id: 'binary-signal', opts: {
+            mode: 'ascii', algorithm: 'threshold', fit: 'cover', cellSize: 14,
+            background: '#000000', foreground: '#f7f7f3', colorMode: 'brightness',
+            palette: ['#242419', '#f7f7f3'], contrast: 2.2, brightness: -0.04,
+            gamma: 0.75, invert: true, threshold: 0.5, ditherAmount: 0,
+            glyphRamp: '01', glyphSelection: 'random', glyphSeed: 41,
+            glyphProbability: 0.5, fontWeight: 700, stagger: false
+          } },
           { id: 'tonemap-symbol', symbol: true, opts: { mode: 'symbols', noiseAmount: 0, toneMap: [
             { min: 0, max: 0.5, primitive: 'symbol', symbol: 'star', scale: 1 },
             { min: 0.5, max: 1, primitive: 'symbol', symbol: 'star', scale: 0.6, color: '#22aa66' }
